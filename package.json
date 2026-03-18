@@ -1,0 +1,53 @@
+{
+  "name": "polyglot-i18n",
+  "version": "0.1.0",
+  "description": "AI-powered i18n translation CLI + GitHub Action. Translate JSON locale files using Gemini or DeepL.",
+  "license": "MIT",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/CellarNode/polyglot-i18n.git"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "bin": {
+    "polyglot-i18n": "./dist/cli.js"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "sideEffects": false,
+  "files": [
+    "dist",
+    "action.yml"
+  ],
+  "keywords": [
+    "i18n", "translation", "gemini", "deepl", "ai", "i18next",
+    "localization", "cli", "github-action", "polyglot"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "pnpm build"
+  },
+  "dependencies": {
+    "commander": "^13.0.0",
+    "@google/genai": "^1.0.0",
+    "deepl-node": "^1.15.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.8.0",
+    "vitest": "^3.0.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

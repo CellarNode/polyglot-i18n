@@ -1,0 +1,99 @@
+name: 'polyglot-i18n'
+description: 'Translate i18n JSON files using Gemini or DeepL, then open a PR'
+branding:
+  icon: 'globe'
+  color: 'blue'
+
+inputs:
+  provider:
+    description: 'Translation provider (gemini or deepl)'
+    required: false
+    default: 'gemini'
+  input:
+    description: 'Path to source English file or directory'
+    required: true
+  output-languages:
+    description: 'Comma-separated target language codes'
+    required: true
+  api-key:
+    description: 'Provider API key'
+    required: true
+  model:
+    description: 'Model name (Gemini only)'
+    required: false
+    default: 'gemini-3.1-flash-lite-preview'
+  output-dir:
+    description: 'Output directory (defaults to sibling of input)'
+    required: false
+  force:
+    description: 'Retranslate all keys'
+    required: false
+    default: 'false'
+  context:
+    description: 'Domain context for better translations'
+    required: false
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Setup Node
+      uses: actions/setup-node@v4
+      with:
+        node-version: 22
+
+    - name: Install polyglot-i18n
+      shell: bash
+      run: npm install -g polyglot-i18n
+
+    - name: Run translation
+      shell: bash
+      env:
+        PROVIDER_API_KEY: ${{ inputs.api-key }}
+      run: |
+        FORCE_FLAG=""
+        if [ "${{ inputs.force }}" = "true" ]; then
+          FORCE_FLAG="--force"
+        fi
+
+        OUTPUT_DIR_FLAG=""
+        if [ -n "${{ inputs.output-dir }}" ]; then
+          OUTPUT_DIR_FLAG="--output-dir ${{ inputs.output-dir }}"
+        fi
+
+        CONTEXT_FLAG=""
+        if [ -n "${{ inputs.context }}" ]; then
+          CONTEXT_FLAG="--context '${{ inputs.context }}'"
+        fi
+
+        polyglot-i18n translate \
+          --input "${{ inputs.input }}" \
+          --output-languages "${{ inputs.output-languages }}" \
+          --provider "${{ inputs.provider }}" \
+          --model "${{ inputs.model }}" \
+          --api-key "$PROVIDER_API_KEY" \
+          $FORCE_FLAG $OUTPUT_DIR_FLAG $CONTEXT_FLAG
+
+    - name: Check for changes
+      id: diff
+      shell: bash
+      run: |
+        git diff --exit-code && echo "changed=false" >> $GITHUB_OUTPUT || echo "changed=true" >> $GITHUB_OUTPUT
+
+    - name: Create PR
+      if: steps.diff.outputs.changed == 'true'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        BRANCH="chore/i18n-translate-$(date +%Y%m%d-%H%M)"
+        git config user.name "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+        git checkout -b "$BRANCH"
+        git add -A
+        git commit -m "chore(i18n): auto-translate with ${{ inputs.provider }}"
+        git push origin "$BRANCH"
+        gh pr create \
+          --title "chore(i18n): auto-translate with ${{ inputs.provider }}" \
+          --body "Automated translation using polyglot-i18n (${{ inputs.provider }}). Review before merging." \
+          --base "${GITHUB_REF_NAME}" \
+          --head "$BRANCH"
