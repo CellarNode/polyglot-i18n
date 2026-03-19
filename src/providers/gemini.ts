@@ -9,12 +9,12 @@ const LANGUAGE_NAMES: Record<string, string> = {
   it: "Italian",
   es: "Spanish",
   sv: "Swedish",
+  ru: "Russian",
   ja: "Japanese",
   ko: "Korean",
   pt: "Portuguese",
   nl: "Dutch",
   pl: "Polish",
-  ru: "Russian",
   ar: "Arabic",
   hi: "Hindi",
   th: "Thai",
@@ -51,6 +51,13 @@ Rules:
 - Do not translate brand names
 - Return ONLY valid JSON, no markdown fences, no explanation`;
 
+const MAX_RETRIES = 3;
+const RETRY_BASE_DELAY_MS = 3000;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 export function buildPrompt(
   entries: TranslationEntry[],
   targetLang: string,
@@ -83,6 +90,42 @@ export function parseGeminiResponse(
   }));
 }
 
+function isRetryableError(err: unknown): boolean {
+  if (err instanceof Error) {
+    const msg = err.message.toLowerCase();
+    return (
+      msg.includes("429") ||
+      msg.includes("rate") ||
+      msg.includes("quota") ||
+      msg.includes("resource_exhausted") ||
+      msg.includes("too many requests") ||
+      msg.includes("503") ||
+      msg.includes("service unavailable") ||
+      msg.includes("timeout") ||
+      msg.includes("econnreset") ||
+      msg.includes("fetch failed")
+    );
+  }
+  return false;
+}
+
+function formatError(err: unknown): string {
+  if (err instanceof Error) {
+    // Extract useful info from Gemini API errors
+    const msg = err.message;
+    if (msg.includes("429") || msg.includes("RESOURCE_EXHAUSTED"))
+      return "Rate limited by Gemini API";
+    if (msg.includes("403")) return "API key invalid or lacks permissions";
+    if (msg.includes("400")) return "Bad request — prompt may be too large";
+    if (msg.includes("500") || msg.includes("503"))
+      return "Gemini API server error";
+    if (msg.includes("fetch failed") || msg.includes("ECONNRESET"))
+      return "Network error — connection dropped";
+    return msg.slice(0, 120);
+  }
+  return String(err).slice(0, 120);
+}
+
 export class GeminiProvider implements TranslationProvider {
   name = "gemini";
   private client: GoogleGenAI;
@@ -100,31 +143,53 @@ export class GeminiProvider implements TranslationProvider {
   ): Promise<TranslationEntry[]> {
     const prompt = buildPrompt(entries, targetLang, context);
 
-    const response = await this.client.models.generateContent({
-      model: this.model,
-      contents: prompt,
-      config: {
-        systemInstruction: SYSTEM_PROMPT,
-        temperature: 0.1,
-      },
-    });
+    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+      try {
+        const response = await this.client.models.generateContent({
+          model: this.model,
+          contents: prompt,
+          config: {
+            systemInstruction: SYSTEM_PROMPT,
+            temperature: 0.1,
+          },
+        });
 
-    const text = response.text ?? "";
+        const text = response.text ?? "";
 
-    try {
-      return parseGeminiResponse(text, entries);
-    } catch {
-      // Retry once on parse failure
-      const retry = await this.client.models.generateContent({
-        model: this.model,
-        contents:
-          prompt + "\n\nIMPORTANT: Return ONLY valid JSON. No explanation.",
-        config: {
-          systemInstruction: SYSTEM_PROMPT,
-          temperature: 0,
-        },
-      });
-      return parseGeminiResponse(retry.text ?? "", entries);
+        try {
+          return parseGeminiResponse(text, entries);
+        } catch {
+          // JSON parse failed — retry with stricter prompt
+          const retry = await this.client.models.generateContent({
+            model: this.model,
+            contents:
+              prompt +
+              "\n\nIMPORTANT: Return ONLY valid JSON. No explanation.",
+            config: {
+              systemInstruction: SYSTEM_PROMPT,
+              temperature: 0,
+            },
+          });
+          return parseGeminiResponse(retry.text ?? "", entries);
+        }
+      } catch (err) {
+        if (isRetryableError(err) && attempt < MAX_RETRIES) {
+          const delay = RETRY_BASE_DELAY_MS * Math.pow(2, attempt - 1);
+          console.log(
+            `      ↻ ${formatError(err)} — retrying in ${(delay / 1000).toFixed(0)}s (attempt ${attempt}/${MAX_RETRIES})`
+          );
+          await sleep(delay);
+          continue;
+        }
+
+        // Non-retryable or exhausted retries
+        throw new Error(
+          `Gemini translation failed after ${attempt} attempt(s): ${formatError(err)}`
+        );
+      }
     }
+
+    // Should never reach here
+    throw new Error("Gemini translation failed: exhausted all retries");
   }
 }

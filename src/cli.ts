@@ -12,7 +12,7 @@ program
   .description(
     "AI-powered i18n translation CLI. Translate JSON locale files using Gemini or DeepL."
   )
-  .version("0.1.0");
+  .version("0.2.0");
 
 program
   .command("translate")
@@ -55,7 +55,9 @@ program
 
     if (!apiKey) {
       console.error(
-        `Error: No API key provided. Use --api-key or set ${opts.provider === "deepl" ? "DEEPL_API_KEY" : "GOOGLE_API_KEY"} env var.`
+        `\n  ✗ No API key provided.\n\n` +
+          `  Set the ${opts.provider === "deepl" ? "DEEPL_API_KEY" : "GOOGLE_API_KEY"} environment variable\n` +
+          `  or pass --api-key <key>\n`
       );
       process.exit(1);
     }
@@ -72,30 +74,70 @@ program
       .map((l: string) => l.trim());
 
     console.log(
-      `\npolyglot-i18n — translating to: ${languages.join(", ")} via ${opts.provider}\n`
+      `\n  polyglot-i18n\n` +
+        `  Provider: ${opts.provider}${opts.provider === "gemini" ? ` (${opts.model})` : ""}\n` +
+        `  Languages: ${languages.join(", ")}\n` +
+        `  Mode: ${opts.force ? "force (retranslate all)" : "incremental (new + changed only)"}\n`
     );
 
-    const result = await translate({
-      input: opts.input,
-      outputLanguages: languages,
-      provider,
-      outputDir: opts.outputDir,
-      force: opts.force,
-      dryRun: opts.dryRun,
-      cacheFile: opts.cacheFile,
-      noCache: !opts.cache,
-      context: opts.context,
-    });
+    try {
+      const result = await translate({
+        input: opts.input,
+        outputLanguages: languages,
+        provider,
+        outputDir: opts.outputDir,
+        force: opts.force,
+        dryRun: opts.dryRun,
+        cacheFile: opts.cacheFile,
+        noCache: !opts.cache,
+        context: opts.context,
+      });
 
-    console.log(`\nDone!`);
-    console.log(`  Translated: ${result.translated} keys`);
-    console.log(`  Changed:    ${result.changed} keys (source updated)`);
-    console.log(`  Skipped:    ${result.skipped} keys (unchanged)`);
-    console.log(`  Files:      ${result.files.length} written`);
+      // Summary
+      console.log(`  ─────────────────────────────────`);
+      console.log(`  ✓ Complete${result.elapsed ? ` in ${result.elapsed}` : ""}\n`);
+      console.log(`    Translated:  ${result.translated} keys`);
+      if (result.changed > 0)
+        console.log(`    Updated:     ${result.changed} keys (source changed)`);
+      if (result.skipped > 0)
+        console.log(`    Skipped:     ${result.skipped} keys (unchanged)`);
+      if (result.failed > 0)
+        console.log(`    Failed:      ${result.failed} keys`);
+      console.log(`    Files:       ${result.files.length} written`);
 
-    if (result.warnings.length > 0) {
-      console.log(`\nWarnings (${result.warnings.length}):`);
-      for (const w of result.warnings) console.log(`  ⚠ ${w}`);
+      if (result.warnings.length > 0) {
+        console.log(
+          `\n  ⚠ Warnings (${result.warnings.length}):`
+        );
+        for (const w of result.warnings.slice(0, 10)) {
+          console.log(`    ${w}`);
+        }
+        if (result.warnings.length > 10) {
+          console.log(
+            `    ... and ${result.warnings.length - 10} more`
+          );
+        }
+      }
+
+      if (result.errors.length > 0) {
+        console.log(`\n  ✗ Errors (${result.errors.length}):`);
+        for (const e of result.errors) {
+          console.log(`    ${e}`);
+        }
+        console.log(
+          `\n  Failed chunks used source text as fallback.\n` +
+            `  Re-run to retry failed translations.\n`
+        );
+      }
+
+      console.log();
+
+      // Exit with error code if there were failures
+      if (result.failed > 0) process.exit(1);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`\n  ✗ Fatal error: ${msg}\n`);
+      process.exit(1);
     }
   });
 

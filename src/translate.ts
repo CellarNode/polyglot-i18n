@@ -32,20 +32,45 @@ export interface TranslateResult {
   translated: number;
   skipped: number;
   changed: number;
+  failed: number;
   warnings: string[];
+  errors: string[];
   files: string[];
+  elapsed?: string;
 }
 
 export interface NamespaceResult {
   translated: number;
   skipped: number;
   changed: number;
+  failed: number;
   warnings: string[];
+  errors: string[];
   output: Record<string, string>;
   newCacheEntries: Record<string, string>;
 }
 
-const CHUNK_SIZE = 50;
+const CHUNK_SIZE = 30;
+const CHUNK_DELAY_MS = 2000;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function progressBar(current: number, total: number, width = 20): string {
+  const filled = Math.round((current / total) * width);
+  const empty = width - filled;
+  const bar = "█".repeat(filled) + "░".repeat(empty);
+  const pct = Math.round((current / total) * 100);
+  return `${bar} ${pct}%`;
+}
+
+function elapsed(startMs: number): string {
+  const s = Math.round((Date.now() - startMs) / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  return `${m}m ${s % 60}s`;
+}
 
 /**
  * Translates a single namespace (flat key-value map) to one target language.
@@ -82,6 +107,8 @@ export async function translateNamespace(opts: {
 
   const output: Record<string, string> = {};
   const warnings: string[] = [];
+  const errors: string[] = [];
+  let failedKeys = 0;
 
   // Carry over unchanged translations
   for (const key of diff.unchanged) {
@@ -93,7 +120,9 @@ export async function translateNamespace(opts: {
       translated: 0,
       skipped: diff.unchanged.length,
       changed: 0,
+      failed: 0,
       warnings: [],
+      errors: [],
       output,
       newCacheEntries: buildCacheEntries(sourceFlat),
     };
@@ -107,11 +136,50 @@ export async function translateNamespace(opts: {
 
   const chunks = chunkEntries(entries, CHUNK_SIZE);
   const translatedEntries: TranslationEntry[] = [];
+  const startTime = Date.now();
 
-  for (const chunk of chunks) {
-    const result = await provider.translate(chunk, targetLang, context);
-    translatedEntries.push(...result);
+  for (let i = 0; i < chunks.length; i++) {
+    if (i > 0) await sleep(CHUNK_DELAY_MS);
+
+    const chunk = chunks[i];
+    const progress = progressBar(i + 1, chunks.length);
+    process.stdout.write(
+      `\r    ${progress} chunk ${i + 1}/${chunks.length} (${chunk.length} keys) [${elapsed(startTime)}]`
+    );
+
+    try {
+      const result = await provider.translate(chunk, targetLang, context);
+      translatedEntries.push(...result);
+    } catch (err) {
+      const errMsg =
+        err instanceof Error ? err.message : String(err);
+      errors.push(
+        `chunk ${i + 1}/${chunks.length}: ${errMsg}`
+      );
+      failedKeys += chunk.length;
+
+      // On chunk failure, preserve source values so the file isn't missing keys
+      for (const entry of chunk) {
+        translatedEntries.push({ key: entry.key, value: entry.value });
+      }
+
+      console.log(
+        `\n    ✗ chunk ${i + 1} failed: ${errMsg.slice(0, 80)}`
+      );
+
+      // If rate limited, add extra delay before next chunk
+      if (
+        errMsg.includes("Rate limited") ||
+        errMsg.includes("429")
+      ) {
+        console.log(`    ⏳ Rate limited — waiting 30s before continuing...`);
+        await sleep(30000);
+      }
+    }
   }
+
+  // Clear the progress line
+  process.stdout.write("\r" + " ".repeat(100) + "\r");
 
   // Validate and merge
   for (const entry of translatedEntries) {
@@ -124,11 +192,17 @@ export async function translateNamespace(opts: {
     warnings.push(...phWarnings);
   }
 
+  const translatedCount = force
+    ? keysToTranslate.length - failedKeys
+    : diff.missing.length - failedKeys;
+
   return {
-    translated: force ? keysToTranslate.length : diff.missing.length,
+    translated: Math.max(0, translatedCount),
     skipped: diff.unchanged.length,
     changed: force ? 0 : diff.changed.length,
+    failed: failedKeys,
     warnings,
+    errors,
     output,
     newCacheEntries: buildCacheEntries(sourceFlat),
   };
@@ -157,7 +231,9 @@ export async function translate(
     translated: 0,
     skipped: 0,
     changed: 0,
+    failed: 0,
     warnings: [],
+    errors: [],
     files: [],
   };
 
@@ -179,7 +255,27 @@ export async function translate(
     sourceFiles.push({ name: basename(input), path: input });
   }
 
+  // Calculate total work
+  let totalKeys = 0;
+  for (const sf of sourceFiles) {
+    const j = JSON.parse(readFileSync(sf.path, "utf-8"));
+    totalKeys += Object.keys(flattenJSON(j)).length;
+  }
+  const totalWork = totalKeys * outputLanguages.length;
+
+  console.log(
+    `  ${sourceFiles.length} namespace(s), ${totalKeys} keys, ${outputLanguages.length} language(s) = ${totalWork} translations\n`
+  );
+
+  const globalStart = Date.now();
+  let completedLangs = 0;
+
   for (const lang of outputLanguages) {
+    completedLangs++;
+    console.log(
+      `  [${completedLangs}/${outputLanguages.length}] ${lang.toUpperCase()}`
+    );
+
     for (const sourceFile of sourceFiles) {
       const sourceJSON = JSON.parse(readFileSync(sourceFile.path, "utf-8"));
       const sourceFlat = flattenJSON(sourceJSON);
@@ -216,14 +312,15 @@ export async function translate(
           ? Object.keys(sourceFlat).length
           : diff.missing.length + diff.changed.length;
         console.log(
-          `[dry-run] ${sourceFile.name} → ${lang}: ${toTranslate} keys to translate, ${diff.unchanged.length} skipped`
+          `  [dry-run] ${sourceFile.name} → ${lang}: ${toTranslate} to translate, ${diff.unchanged.length} skipped`
         );
         totalResult.translated += toTranslate;
         totalResult.skipped += diff.unchanged.length;
         continue;
       }
 
-      console.log(`  ${sourceFile.name} → ${lang}...`);
+      const keyCount = Object.keys(sourceFlat).length;
+      console.log(`  ${sourceFile.name} (${keyCount} keys)`);
 
       const result = await translateNamespace({
         sourceFlat,
@@ -250,15 +347,30 @@ export async function translate(
       totalResult.translated += result.translated;
       totalResult.skipped += result.skipped;
       totalResult.changed += result.changed;
+      totalResult.failed += result.failed;
       totalResult.warnings.push(...result.warnings);
+      totalResult.errors.push(...result.errors);
       totalResult.files.push(outputPath);
+
+      // Per-namespace summary
+      const parts: string[] = [];
+      if (result.translated > 0) parts.push(`${result.translated} translated`);
+      if (result.changed > 0) parts.push(`${result.changed} updated`);
+      if (result.skipped > 0) parts.push(`${result.skipped} skipped`);
+      if (result.failed > 0) parts.push(`${result.failed} failed`);
+      console.log(`    ✓ ${parts.join(", ")}`);
     }
+
+    console.log();
   }
 
   // Write cache
   if (cacheFilePath && !dryRun) {
     writeFileSync(cacheFilePath, JSON.stringify(fullCache, null, 2) + "\n");
   }
+
+  // Final timing
+  totalResult.elapsed = elapsed(globalStart);
 
   return totalResult;
 }
