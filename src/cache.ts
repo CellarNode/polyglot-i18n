@@ -39,7 +39,7 @@ export function computeDiff(
   const unchanged: string[] = [];
 
   for (const key of Object.keys(sourceFlat)) {
-    if (!(key in targetFlat)) {
+    if (!(key in targetFlat) || targetFlat[key] === "") {
       missing.push(key);
     } else {
       const currentHash = hashValue(sourceFlat[key]);
