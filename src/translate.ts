@@ -291,9 +291,13 @@ export async function translate(
         mkdirSync(outDir, { recursive: true });
         outputPath = join(outDir, sourceFile.name);
       } else {
-        const outDir = options.outputDir ?? dirname(input);
+        const outDir = options.outputDir
+          ? join(options.outputDir, lang)
+          : dirname(input);
         mkdirSync(outDir, { recursive: true });
-        outputPath = join(outDir, `${lang}.json`);
+        outputPath = options.outputDir
+          ? join(outDir, sourceFile.name)
+          : join(outDir, `${lang}.json`);
       }
 
       // Load existing target
