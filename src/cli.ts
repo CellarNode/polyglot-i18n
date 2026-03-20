@@ -12,7 +12,7 @@ program
   .description(
     "AI-powered i18n translation CLI. Translate JSON locale files using Gemini or DeepL."
   )
-  .version("0.2.0");
+  .version("0.2.2");
 
 program
   .command("translate")

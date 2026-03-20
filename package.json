@@ -1,6 +1,6 @@
 {
   "name": "polyglot-i18n",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "AI-powered i18n translation CLI + GitHub Action. Translate JSON locale files using Gemini or DeepL.",
   "license": "MIT",
   "type": "module",
