@@ -91,3 +91,20 @@ This rule is re-stated in every consumer's AGENTS.md (`cellarnode-public-site`, 
 ## Consumers
 
 All CellarNode i18n pipelines: `cellarnode-public-site`, `producer-dashboard`, `cellarnode-importer-dashboard`, `cellarnode-elabel-frontend`, `cellarnode-mobile-app` (manual mode), and the locale dev workflow of `@cellarnode/i18n` itself.
+
+## Agent skills
+
+### Issue tracker
+
+Linear, workspace `cellarnode`, team **CellarNode** (`CEL`) — Linear MCP first,
+GraphQL `issueCreate` fallback. There are no GitHub issues. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Linear states carry `needs-triage` (`Backlog`) and `wontfix` (`Canceled`); three new labels
+carry `needs-info`, `ready-for-agent`, `ready-for-human`. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context. ADRs are graph-anchored RepoSkein decisions, not `docs/adr/*.md`.
+See `docs/agents/domain.md`.
