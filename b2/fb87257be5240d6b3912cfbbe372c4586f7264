@@ -1,0 +1,21 @@
+.reposkein/.gitattributes
+  s_9e749c32eaa63c::t_0082166edc01db 1-7
+.reposkein/.gitignore
+  s_9e749c32eaa63c::t_be4515b495d428 2-4
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.24",
+  "base_commit_sha": "b2fb87257be5240d6b3912cfbbe372c4586f7264",
+  "prompts": {},
+  "sessions": {
+    "s_9e749c32eaa63c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "1c1a1567-9cb5-40f3-9138-ba09238fd642",
+        "model": "claude-opus-5"
+      },
+      "human_author": "mjnong <marcusnagy@icloud.com>"
+    }
+  }
+}
