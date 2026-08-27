@@ -156,11 +156,13 @@ grows a `langs` map:
         "ru": { "hash": "1d4f2a9c", "state": "stale" }
       }
     },
-    // de asked twice and got the English source back both times, so it stopped
-    // asking — at that hash. Any English edit, or --force, asks again.
+    // el converged twice on a group whose value the leak guard examined and
+    // waved through, so it stopped asking — at that hash. Any English edit,
+    // or --force, asks again. (A Latin-script target like de never earns an
+    // accept this way — the guard does not run there, so it is re-queued.)
     "item_other": {
       "hash": "6ec1b820",
-      "langs": { "de": { "hash": "6ec1b820", "state": "accepted" } }
+      "langs": { "el": { "hash": "6ec1b820", "state": "accepted" } }
     },
     "cancel": "8b03e517"
   }
@@ -324,7 +326,10 @@ model has already been asked about this exact text and that the file already hol
 translation — and accepts it instead of paying again. Three things can never be accepted, and each
 goes back to being retried instead:
 
-- a target file holding the English source — that value is the whole reason for the eviction;
+- a target file holding the English source, with one deliberate exception: a **non-Latin-script**
+  plural group that converged to the English source across two rounds — every value examined by
+  the leak guard — is accepted rather than re-asked forever (on Latin-script targets, where the
+  guard cannot judge, such a group is always re-queued);
 - a translation made from English that has since been edited, however long ago the eviction was
   written, because the value on disk renders text that is gone;
 - anything at all under `--force`.

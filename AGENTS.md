@@ -89,10 +89,12 @@ reached by a language that already has one.
 `accepted` is the mitigation the dimension unlocks: a key whose target file already holds a better
 answer than the provider can produce (a uniform `{{count}} мл` group, a `{{count}} PDF` the leak
 guard examined and waved through) stops being retried, for that language, against that source
-hash. It never forms under `--force`, never over a target file holding the English source, and
-never where the leak guard did not run — on a Latin-script target an English leak is
-indistinguishable from a value that is English by necessity, so the re-queue stands and the
-per-run cost is paid. Both eviction and accept are per language by construction —
+hash. It never forms under `--force`, and never where the leak guard did not run — on a
+Latin-script target an English leak is indistinguishable from a value that is English by
+necessity, so the re-queue stands and the per-run cost is paid. A target file holding the English
+source is accepted only through one deliberate path: a non-Latin group that converged to the
+English source across two guard-examined rounds; everywhere else an English-holding file goes
+back to being retried. Both eviction and accept are per language by construction —
 `staleSourceKeys` / `acceptedSourceKeys` / `sourceProvenance` on `NamespaceResult`.
 
 ## Structure
