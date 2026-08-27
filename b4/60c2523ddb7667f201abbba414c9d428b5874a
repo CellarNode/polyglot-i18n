@@ -1,0 +1,50 @@
+src/providers/types.ts
+  s_b307391c251243::t_f22cc59df9f790 33-42
+src/__tests__/leak-guard.test.ts
+  s_b307391c251243::t_a410b7c13b3588 6,82-84,93-109,111-126,144-149,164-165,168,170,175-194,220,243,281-307,325,368-400,419,439-468
+  s_b307391c251243::t_8073db997dbc52 110
+  s_b307391c251243::t_a2d625dee84fa7 127-143
+  s_b307391c251243::t_9c42adc9bae755 469
+src/__tests__/providers/gemini-guard.test.ts
+  s_b307391c251243::t_2fe097adc1f9d1 1-263
+src/translate.ts
+  s_b307391c251243::t_e5f9b533651060 273-275,278,280-282
+  s_b307391c251243::t_36b4e400fd5aa6 330-349
+  s_b307391c251243::t_bf00765e2a25ed 361-367,369
+  s_b307391c251243::t_f8a4786f89f287 248-250,360,370
+src/__tests__/leak-guard-corpus.test.ts
+  s_b307391c251243::t_98db2a2a5ea5b3 1-129
+src/leak-guard.ts
+  s_b307391c251243::t_10d2a0cf33b003 1,14-22,28,30-31,37-53,61-63,66,116-156,159-160,169-202,205-215,221-222,228-232,260,267-280,284,286,290-292,322-329,353,359-361,366-369,375,377
+src/providers/gemini.ts
+  s_b307391c251243::t_bc6c8e115ba401 224-232,234,239-240,242-245,247,263-281,285,293,307-363
+  s_b307391c251243::t_61d943a24379ab 452,458-469,473,475-488,494-499,501-510,512,515
+  s_b307391c251243::t_b6efe48c550f4a 364
+src/plurals.ts
+  s_b307391c251243::t_7a4da6589f45da 70-78
+  s_b307391c251243::t_963acb89fce48d 132
+README.md
+  s_b307391c251243::t_189f2b59dd3c0f 169-221
+src/__tests__/fixtures/shipped-locale-pairs.json
+  s_b307391c251243::t_5b9bc1f4dd6e68 1-605
+src/__tests__/translate.test.ts
+  s_b307391c251243::t_0dc46cefebd4b7 228,247-253,403-405,427-428,431,435-505
+src/cli.ts
+  s_b307391c251243::t_8ffa4b14567dc7 128-130
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "b460c2523ddb7667f201abbba414c9d428b5874a",
+  "prompts": {},
+  "sessions": {
+    "s_b307391c251243": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "8c2f8e8a-6a3a-4ebf-a791-70c464da37fe",
+        "model": "claude-fable-5"
+      },
+      "human_author": "mjnong <marcusnagy@icloud.com>"
+    }
+  }
+}
