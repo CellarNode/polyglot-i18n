@@ -1,0 +1,19 @@
+package.json
+  s_b307391c251243::t_33ce604c4814c3 3
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.24",
+  "base_commit_sha": "c80bc84d40da19b3ebca67d798c54a61930ff8c7",
+  "prompts": {},
+  "sessions": {
+    "s_b307391c251243": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "8c2f8e8a-6a3a-4ebf-a791-70c464da37fe",
+        "model": "claude-fable-5"
+      },
+      "human_author": "mjnong <marcusnagy@icloud.com>"
+    }
+  }
+}
