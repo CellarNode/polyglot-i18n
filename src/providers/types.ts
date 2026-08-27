@@ -21,6 +21,15 @@ export interface TranslationEntry {
    * `targetCategories` member instead of a single entry for `key`.
    */
   plural?: PluralExpansion;
+  /**
+   * Set by a provider when the returned value could not be trusted — it echoed
+   * the English source, or the model produced no target form at all (CEL-1539).
+   * `value` then carries the English source only so the key set stays complete;
+   * consumers MUST NOT write it. `translateNamespace` counts these as failures,
+   * keeps any previous translation, and leaves the key out of the cache so the
+   * next run retries it.
+   */
+  failed?: { reason: string; detail: string };
 }
 
 export interface TranslationProvider {

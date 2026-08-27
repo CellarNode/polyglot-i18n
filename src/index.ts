@@ -16,5 +16,11 @@ export {
   PLURAL_CATEGORIES,
 } from "./plurals.js";
 export type { PluralCategory, PluralGroup } from "./plurals.js";
+export {
+  detectLeaks,
+  findSourceEchoTokens,
+  usesNonLatinScript,
+} from "./leak-guard.js";
+export type { LeakReason, LeakSuspect } from "./leak-guard.js";
 export { GeminiProvider } from "./providers/gemini.js";
 export { DeepLProvider } from "./providers/deepl.js";

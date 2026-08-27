@@ -244,6 +244,7 @@ export async function translateNamespace(opts: {
 
   const chunks = chunkEntries(entries, CHUNK_SIZE);
   const translatedEntries: TranslationEntry[] = [];
+  const failedSourceKeys = new Set<string>();
   const startTime = Date.now();
 
   for (let i = 0; i < chunks.length; i++) {
@@ -266,9 +267,27 @@ export async function translateNamespace(opts: {
       );
       failedKeys += chunk.length;
 
-      // On chunk failure, preserve source values so the file isn't missing keys
+      // On chunk failure, keep the previous translation where there is one and
+      // only fall back to the English source for keys the target has never had
+      // — an API outage must not overwrite a good translation with English.
       for (const entry of chunk) {
-        translatedEntries.push(...expandPluralFallback(entry));
+        for (const fallback of expandPluralFallback(entry)) {
+          const previous = targetFlat[fallback.key];
+          translatedEntries.push({
+            key: fallback.key,
+            value:
+              previous !== undefined && previous !== ""
+                ? previous
+                : fallback.value,
+          });
+          for (const key of sourceKeysFor(
+            fallback.key,
+            sourceFlat,
+            pluralGroups
+          )) {
+            failedSourceKeys.add(key);
+          }
+        }
       }
 
       console.log(
@@ -291,11 +310,33 @@ export async function translateNamespace(opts: {
 
   // Validate and merge
   for (const entry of translatedEntries) {
+    // A provider that flagged the value could not produce trustworthy target
+    // text (CEL-1539). Writing it would put English in the locale file, so the
+    // key keeps its previous translation — or is left out entirely — and is
+    // counted as failed.
+    if (entry.failed) {
+      failedKeys++;
+      errors.push(
+        `Key "${entry.key}": ${entry.failed.reason} — ${entry.failed.detail}`
+      );
+      const previous = targetFlat[entry.key];
+      if (previous !== undefined && previous !== "") output[entry.key] = previous;
+      for (const key of sourceKeysFor(entry.key, sourceFlat, pluralGroups)) {
+        failedSourceKeys.add(key);
+      }
+      continue;
+    }
+
     output[entry.key] = entry.value;
     const source = resolveSourceValue(entry.key, sourceFlat, pluralGroups);
     if (source === undefined) continue;
     warnings.push(...validatePlaceholders(source, entry.value, entry.key));
   }
+
+  // A failed key must NOT be cached as translated, or the next run would see
+  // the source hash unchanged and skip it forever.
+  const newCacheEntries = buildCacheEntries(sourceFlat);
+  for (const key of failedSourceKeys) delete newCacheEntries[key];
 
   const translatedCount = force
     ? keysToTranslate.length - failedKeys
@@ -309,9 +350,25 @@ export async function translateNamespace(opts: {
     warnings,
     errors,
     output,
-    newCacheEntries: buildCacheEntries(sourceFlat),
+    newCacheEntries,
     outputKeyOrder,
   };
+}
+
+/**
+ * Source keys whose translation depends on an emitted key. An expanded plural
+ * category has no source key of its own, so a failure there invalidates the
+ * whole group.
+ */
+function sourceKeysFor(
+  key: string,
+  sourceFlat: Record<string, string>,
+  pluralGroups: Map<string, PluralGroup>
+): string[] {
+  if (key in sourceFlat) return [key];
+  const parts = splitPluralKey(key);
+  const group = parts ? pluralGroups.get(parts.base) : undefined;
+  return group ? group.sourceKeys : [];
 }
 
 /**

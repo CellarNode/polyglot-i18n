@@ -164,6 +164,28 @@ Details worth knowing:
 - **Gemini only.** DeepL translates strings, not key sets, so the DeepL provider keeps writing
   the flat English key set.
 
+## Translation-quality guard
+
+Gemini output is inspected before it is written (`src/leak-guard.ts`). A value is rejected when it
+
+- carries English words copied from the source, for a target language written in a non-Latin
+  script (`zh`, `ru`, `uk`, `ar`, ...) — placeholders, HTML, URLs, brand names and acronyms are
+  exempt, so `CellarNode`, `PDF` and `{{count}}` survive untouched;
+- is missing entirely, where earlier versions silently wrote the English source instead;
+- repeats one identical string across every plural category of a language that grammatically
+  distinguishes more than two, while English itself distinguishes its forms.
+
+A chunk with any rejected value is sent back to the model once, with the specific problems named.
+If the value is still bad, the key **fails** rather than being written:
+
+- the previous translation is kept, or the key is left out of the file entirely — English is
+  never written over a good translation;
+- the key is reported in `errors` and counted in `failed`;
+- the key is left out of `.polyglot-cache.json`, so the next run retries it.
+
+Latin-script targets (`fr`, `de`, `it`, `es`, `sv`) get the prompt hardening but not the
+source-echo check: a stray `option` there is indistinguishable from a loanword.
+
 ## Providers
 
 ### Google Gemini

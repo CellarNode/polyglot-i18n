@@ -1,5 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { buildPrompt, parseGeminiResponse } from "../../providers/gemini.js";
+import {
+  buildPrompt,
+  parseGeminiResponse,
+  SYSTEM_PROMPT,
+} from "../../providers/gemini.js";
 import type { TranslationEntry } from "../../providers/types.js";
 
 describe("buildPrompt", () => {
@@ -31,12 +35,17 @@ describe("buildPrompt", () => {
     );
     expect(prompt).toContain("Beverage industry");
   });
+
+  it("adds no plural block to a request without plural groups", () => {
+    const prompt = buildPrompt([{ key: "save", value: "Save" }], "ru");
+    expect(prompt).not.toContain("Plural rules for this request");
+  });
 });
 
 describe("parseGeminiResponse", () => {
   it("parses valid JSON response", () => {
     const response = '{"save": "Spara", "cancel": "Avbryt"}';
-    const entries = parseGeminiResponse(response, [
+    const { entries } = parseGeminiResponse(response, [
       { key: "save", value: "Save" },
       { key: "cancel", value: "Cancel" },
     ]);
@@ -48,7 +57,7 @@ describe("parseGeminiResponse", () => {
 
   it("strips markdown fences from response", () => {
     const response = '```json\n{"save": "Spara"}\n```';
-    const entries = parseGeminiResponse(response, [
+    const { entries } = parseGeminiResponse(response, [
       { key: "save", value: "Save" },
     ]);
     expect(entries[0].value).toBe("Spara");
@@ -58,6 +67,26 @@ describe("parseGeminiResponse", () => {
     expect(() =>
       parseGeminiResponse("not json", [{ key: "save", value: "Save" }])
     ).toThrow();
+  });
+
+  it("reads a nested response instead of falling back to English", () => {
+    // The request uses flat dotted keys; a model that nests them used to make
+    // every key resolve to `undefined` and get backfilled with English.
+    const response = '{"card": {"beverage": "产品"}}';
+    const { entries, unresolved } = parseGeminiResponse(response, [
+      { key: "card.beverage", value: "Product" },
+    ]);
+    expect(entries).toEqual([{ key: "card.beverage", value: "产品" }]);
+    expect(unresolved.size).toBe(0);
+  });
+
+  it("never substitutes the English source for a key the model dropped", () => {
+    const { entries, unresolved } = parseGeminiResponse('{"save": "Spara"}', [
+      { key: "save", value: "Save" },
+      { key: "cancel", value: "Cancel" },
+    ]);
+    expect(entries).toEqual([{ key: "save", value: "Spara" }]);
+    expect([...unresolved]).toEqual(["cancel"]);
   });
 });
 
@@ -83,7 +112,7 @@ describe("plural expansion (CEL-1267)", () => {
     expect(prompt).toContain("item_one, item_few, item_many, item_other");
   });
 
-  it("adds no plural section when the target needs no extra categories", () => {
+  it("adds no 'Plural forms required' section when the target needs no extra categories", () => {
     const prompt = buildPrompt(
       [
         {
@@ -109,37 +138,124 @@ describe("plural expansion (CEL-1267)", () => {
       item_other: "{{count}} товара",
     });
 
-    expect(parseGeminiResponse(response, [RU_PLURAL_ENTRY])).toEqual([
+    const { entries, filledFromOther } = parseGeminiResponse(response, [
+      RU_PLURAL_ENTRY,
+    ]);
+    expect(entries).toEqual([
       { key: "item_one", value: "{{count}} товар" },
       { key: "item_few", value: "{{count}} товара" },
       { key: "item_many", value: "{{count}} товаров" },
       { key: "item_other", value: "{{count}} товара" },
     ]);
+    expect(filledFromOther.size).toBe(0);
   });
 
-  it("falls back to the translated _other form for a category the model skipped", () => {
+  it("fills a skipped category from the translated _other form and records it", () => {
     const response = JSON.stringify({
       item_one: "{{count}} товар",
       item_other: "{{count}} товара",
     });
 
-    const parsed = parseGeminiResponse(response, [RU_PLURAL_ENTRY]);
-    expect(parsed.map((e) => e.key)).toEqual([
+    const { entries, filledFromOther } = parseGeminiResponse(response, [
+      RU_PLURAL_ENTRY,
+    ]);
+    expect(entries.map((e) => e.key)).toEqual([
       "item_one",
       "item_few",
       "item_many",
       "item_other",
     ]);
-    // Never leaks English when the model produced a usable target form.
-    expect(parsed[1].value).toBe("{{count}} товара");
-    expect(parsed[2].value).toBe("{{count}} товара");
+    // Never leaks English when the model produced a usable target form...
+    expect(entries[1].value).toBe("{{count}} товара");
+    expect(entries[2].value).toBe("{{count}} товара");
+    // ...but the copy is recorded so the guard can see the categories were
+    // not actually differentiated (CEL-1539).
+    expect([...filledFromOther].sort()).toEqual(["item_few", "item_many"]);
+  });
+
+  it("leaves a category unresolved when the model returned no _other either", () => {
+    const { entries, unresolved } = parseGeminiResponse(
+      JSON.stringify({ item_one: "{{count}} товар" }),
+      [RU_PLURAL_ENTRY]
+    );
+    expect(entries).toEqual([{ key: "item_one", value: "{{count}} товар" }]);
+    expect([...unresolved].sort()).toEqual([
+      "item_few",
+      "item_many",
+      "item_other",
+    ]);
   });
 
   it("still returns one entry per key for non-plural entries", () => {
     expect(
       parseGeminiResponse('{"save": "Сохранить"}', [
         { key: "save", value: "Save" },
-      ])
+      ]).entries
     ).toEqual([{ key: "save", value: "Сохранить" }]);
+  });
+});
+
+describe("prompt hardening against English leaks (CEL-1539)", () => {
+  it("tells the model that every value must be fully in the target language", () => {
+    expect(SYSTEM_PROMPT).toContain(
+      "EVERY value you return must be written entirely in the target language"
+    );
+    expect(SYSTEM_PROMPT).toContain(
+      'Ordinary nouns like "product", "option" or "listing" are never'
+    );
+    expect(SYSTEM_PROMPT).toContain("key is a defect; there is no fallback");
+    expect(SYSTEM_PROMPT).toContain(
+      "Plural categories must DIFFER wherever the target language's grammar differs"
+    );
+    expect(SYSTEM_PROMPT).toContain("never expanded into nested objects");
+  });
+
+  it("repeats both requirements in the grouped-plural block", () => {
+    const prompt = buildPrompt([RU_PLURAL_ENTRY], "ru", "Beverage industry");
+
+    expect(prompt).toContain(
+      "Plural rules for this request (Russian, categories: one, few, many, other)"
+    );
+    expect(prompt).toContain("Translate EVERY plural value fully into Russian");
+    expect(prompt).toContain(
+      'Copying an English word such as "product", "option" or "listing" into any value is a defect'
+    );
+    expect(prompt).toContain(
+      "Repeat identical text across categories ONLY when Russian genuinely uses one form for them"
+    );
+    expect(prompt).toContain("A missing key is not backfilled — it is dropped");
+    // Context passthrough is unchanged.
+    expect(prompt).toContain("Context: Beverage industry");
+  });
+
+  it("hardens the zh path too, where the union adds a category zh lacks", () => {
+    const prompt = buildPrompt(
+      [
+        {
+          key: "card.beverage_other",
+          value: "Products",
+          plural: {
+            base: "card.beverage",
+            sourceForms: { one: "Product", other: "Products" },
+            targetCategories: ["one", "other"],
+          },
+        },
+      ],
+      "zh"
+    );
+    // No extra categories are needed, so the old prompt said nothing at all —
+    // which is the path that leaked "Product" into 13 zh keys.
+    expect(prompt).not.toContain("Plural forms required");
+    expect(prompt).toContain(
+      "Plural rules for this request (Chinese (Simplified), categories: one, other)"
+    );
+  });
+
+  it("matches the recorded system prompt", () => {
+    expect(SYSTEM_PROMPT).toMatchSnapshot();
+  });
+
+  it("matches the recorded grouped-plural prompt", () => {
+    expect(buildPrompt([RU_PLURAL_ENTRY], "ru", "Beverage industry")).toMatchSnapshot();
   });
 });

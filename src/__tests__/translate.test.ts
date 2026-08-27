@@ -291,3 +291,141 @@ describe("translateNamespace — non-English plural categories (CEL-1267)", () =
     expect(result.output).toEqual({ step_one: "[ru] Step one" });
   });
 });
+
+/**
+ * A provider that could not produce trustworthy text marks the entry `failed`.
+ * The value it carries is the English source — writing it is exactly the
+ * CEL-1539 defect, so `translateNamespace` must refuse it.
+ */
+function createLeakingProvider(): TranslationProvider {
+  return {
+    name: "leaking",
+    supportsPluralExpansion: true,
+    translate: vi.fn(async (entries: TranslationEntry[]) =>
+      entries.flatMap((e) =>
+        e.plural
+          ? e.plural.targetCategories.map((category) => ({
+              key: `${e.plural!.base}_${category}`,
+              value: e.plural!.sourceForms[category] ?? e.value,
+              failed: {
+                reason: "source-echo",
+                detail: 'untranslated English left in the value: "product"',
+              },
+            }))
+          : [
+              {
+                key: e.key,
+                value: e.value,
+                failed: {
+                  reason: "source-echo",
+                  detail: 'untranslated English left in the value: "product"',
+                },
+              },
+            ]
+      )
+    ),
+  };
+}
+
+describe("leak-guard failures (CEL-1539)", () => {
+  it("never writes a flagged value, and counts it as failed", async () => {
+    const result = await translateNamespace({
+      sourceFlat: { "card.beverage": "Product" },
+      targetFlat: {},
+      cacheEntries: {},
+      provider: createLeakingProvider(),
+      targetLang: "zh",
+      force: false,
+    });
+
+    expect(result.output["card.beverage"]).toBeUndefined();
+    expect(result.failed).toBe(1);
+    expect(result.translated).toBe(0);
+    expect(result.errors[0]).toContain("card.beverage");
+    expect(result.errors[0]).toContain("source-echo");
+  });
+
+  it("keeps the previous translation rather than regressing it to English", async () => {
+    const result = await translateNamespace({
+      sourceFlat: { "card.beverage": "Product" },
+      targetFlat: { "card.beverage": "产品" },
+      cacheEntries: {},
+      provider: createLeakingProvider(),
+      targetLang: "zh",
+      force: true,
+    });
+
+    expect(result.output["card.beverage"]).toBe("产品");
+    expect(result.failed).toBe(1);
+  });
+
+  it("leaves a failed key out of the cache so the next run retries it", async () => {
+    const result = await translateNamespace({
+      sourceFlat: { "card.beverage": "Product", save: "Save" },
+      targetFlat: {},
+      cacheEntries: {},
+      provider: {
+        name: "half-leaking",
+        supportsPluralExpansion: true,
+        translate: vi.fn(async (entries: TranslationEntry[]) =>
+          entries.map((e) =>
+            e.key === "save"
+              ? { key: e.key, value: "保存" }
+              : {
+                  key: e.key,
+                  value: e.value,
+                  failed: { reason: "source-echo", detail: "leak" },
+                }
+          )
+        ),
+      },
+      targetLang: "zh",
+      force: false,
+    });
+
+    expect(result.output.save).toBe("保存");
+    expect(result.newCacheEntries.save).toBe(hashValue("Save"));
+    expect("card.beverage" in result.newCacheEntries).toBe(false);
+  });
+
+  it("invalidates the whole plural group when one category fails", async () => {
+    const result = await translateNamespace({
+      sourceFlat: RU_SOURCE,
+      targetFlat: {},
+      cacheEntries: {},
+      provider: createLeakingProvider(),
+      targetLang: "ru",
+      force: false,
+    });
+
+    expect(result.output).toEqual({});
+    expect(result.failed).toBe(4);
+    expect(Object.keys(result.newCacheEntries)).toEqual([]);
+  });
+
+  it("keeps a chunk-failure fallback from overwriting a good translation", async () => {
+    const provider: TranslationProvider = {
+      name: "exploding",
+      supportsPluralExpansion: true,
+      translate: vi.fn(async () => {
+        throw new Error("boom");
+      }),
+    };
+
+    const result = await translateNamespace({
+      sourceFlat: RU_SOURCE,
+      targetFlat: { item_one: "{{count}} товар", item_other: "{{count}} товара" },
+      cacheEntries: {},
+      provider,
+      targetLang: "ru",
+      force: true,
+    });
+
+    // Existing Russian survives; only the categories that never existed fall
+    // back to English, and no key is cached as done.
+    expect(result.output.item_one).toBe("{{count}} товар");
+    expect(result.output.item_other).toBe("{{count}} товара");
+    expect(result.output.item_many).toBe("{{count}} items");
+    expect(Object.keys(result.newCacheEntries)).toEqual([]);
+  });
+});
