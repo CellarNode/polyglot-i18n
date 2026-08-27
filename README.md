@@ -121,6 +121,56 @@ polyglot-i18n tracks which English strings have been translated via a `.polyglot
 
 Use `--force` to retranslate everything regardless of cache state.
 
+### The cache has a language dimension
+
+An entry is normally just the hash of the English source, meaning "every language is done with
+this text":
+
+```jsonc
+// .polyglot-cache.json
+{
+  "common.json": {
+    "save": "1d4f2a9c",
+    "cancel": "8b03e517"
+  }
+}
+```
+
+A language that could **not** finish a key records an exception against itself, and the entry
+grows a `langs` map:
+
+```jsonc
+{
+  "common.json": {
+    // zh could not vouch for its value and will retry; every other language is
+    // still cached and is NOT retranslated because of it.
+    "save": { "hash": "1d4f2a9c", "langs": { "zh": "stale" } },
+    // de asked twice and got the English source back both times, so it stopped
+    // asking. Any English edit, or --force, asks again.
+    "item_other": { "hash": "6ec1b820", "langs": { "de": "accepted" } },
+    "cancel": "8b03e517"
+  }
+}
+```
+
+- **Cache files from 0.3.x and earlier load unchanged.** A bare hash keeps its old meaning —
+  cached for every language — so nothing needs migrating and no first run after upgrading
+  retranslates anything it would not have retranslated before. A key upgrades to the record shape
+  only when a language actually needs an exception on it.
+- **A language not named in `langs` is cached.** That cannot silently skip a language with no
+  translation on disk: a key absent from a target file is classified **Missing** before the cache
+  is consulted at all.
+- **One language's problem is not another language's bill.** Before 0.4.0 an eviction was
+  expressed by deleting the key, which deleted it for everyone, so a single degraded `zh` value
+  meant `sv`, `fr`, `de`, `it`, `es` and `ru` all retranslated it on the next run — with a
+  different model answer each time.
+- **Evictions survive the process.** Running `-o zh` and then `-o ru` as two separate commands now
+  behaves exactly like `-o zh,ru`. Before 0.4.0 the second command put the first command's
+  evictions back.
+
+`--cache-file` and `--no-cache` are unchanged. Commit `.polyglot-cache.json` — it is what stops CI
+from clobbering hand-edited translations.
+
 ## Plural Categories
 
 English has two plural categories (`one`, `other`). Many languages have more — Russian, Polish
@@ -155,7 +205,9 @@ Details worth knowing:
   variant, which i18next requires. A lone `step_one` ("Step one") is left alone. A base with
   NOTHING but `_other` needs a count placeholder to qualify: `listingCount_other`
   ("{{count}} listings") is a plural, `document.kind_other` ("Document") is an enum member and
-  expanding it would invent `_one`/`_few`/`_many` keys i18next then serves.
+  expanding it would invent `_one`/`_few`/`_many` keys i18next then serves. When a rejected base
+  still has such siblings in a target file from an earlier run, they are dropped — and the run
+  says so by name, rather than removing them in silence.
 - **Categories are never removed.** The emitted set is the union of the English categories and
   the target's own, so a language with fewer categories than English (`zh`, `ja`) keeps its
   existing translations.
@@ -165,10 +217,14 @@ Details worth knowing:
   holds the English form it would have been backfilled with is complete by key count and carries
   no translation; it is retranslated without `--force`. Only groups whose English has two or more
   distinct forms qualify — one form repeated is what a filename or a `{{count}} мл` legitimately
-  looks like.
-- **The cache stays keyed on English.** `.polyglot-cache.json` tracks the English source keys;
-  the extra target-only forms are carried over untouched between runs. It is scoped per namespace
-  and shared across languages, so a key any language drops stays dropped for the whole run.
+  looks like. If the retranslation hands back the English source **again**, the group is accepted
+  for that language and stops being re-queued: a third attempt cannot produce a different answer,
+  and on a Latin-script target — where the leak guard does not run — this used to repeat forever.
+  `--force`, or an edit to the English, asks again.
+- **The cache stays keyed on English, per language.** `.polyglot-cache.json` tracks the English
+  source keys; the extra target-only forms are carried over untouched between runs. It is scoped
+  per namespace, and a key one language drops stays dropped **for that language**, across
+  invocations — see [How Incremental Translation Works](#how-incremental-translation-works).
 - **Ordinals are handled too** — an i18next `_ordinal_*` key resolves against ordinal rules.
 - **Gemini writes them; DeepL never deletes them.** DeepL translates strings, not key sets, so it
   is still sent the flat English key set. Target-only categories already in the file are carried
@@ -199,8 +255,8 @@ What happens to a value that is still flagged afterwards depends on what it is:
 | --- | --- |
 | English spliced into a translated value, or no value at all | **Blocked.** The previous translation is kept, or the key is left out of the file entirely. Counted in `failed`, reported in `errors`, dropped from the cache. |
 | Byte-identical to the source, **and** built from ordinary UI vocabulary (`Save`, `Download labels`) | **Blocked**, same as above. The whole value is the source and every word in it is one a translator renders — English never reaches the file. |
-| Byte-identical to the source, uncorroborated (`Systembolaget`, `Vintage`, `qr-labels-{{count}}.zip`) | **Never blocked.** The previous translation wins if there is one; otherwise the value is written. Reported as a warning and dropped from the cache, never counted in `failed`. |
-| A uniform plural group | **Never blocked.** Same as above: warned, written or beaten by the previous translation, dropped from the cache. |
+| Byte-identical to the source, uncorroborated (`Systembolaget`, `Vintage`, `qr-labels-{{count}}.zip`) | **Never blocked.** The previous translation wins if there is one; otherwise the value is written. Reported as a warning and dropped from the cache, never counted in `failed`. Once a real translation on disk has beaten the same English twice, the key is accepted for that language and stops being retried. |
+| A uniform plural group | **Never blocked.** Same as above: warned, written or beaten by the previous translation, dropped from the cache, then accepted on the retry that changes nothing. |
 | A category copied from a translated `_other` | **Written**, reported as a warning. |
 
 English is never written over a gap on any path — including an API outage, where a failed chunk
@@ -213,11 +269,17 @@ satisfy it. Only the target file can tell those apart from a real leak, so the d
 there.
 
 A uniform group that is uniform BY NECESSITY (`{{count}} мл` — Russian unit abbreviations do not
-inflect) can never stop being suspect, so it costs one corrective retry and one cache eviction on
-**every run, forever**. That is the accepted price of never caching a value the guard cannot
-distinguish from a real under-differentiation. It applies to Latin-script `pl`, `cs`, `lt` and
+inflect) can never stop being suspect, so the first run that meets it spends one corrective retry
+and one cache eviction on it. That is the accepted price of never caching a value the guard cannot
+distinguish from a real under-differentiation, and it applies to Latin-script `pl`, `cs`, `lt` and
 `lv` as well, because the uniform check is deliberately outside the script gate — those languages
 need four CLDR categories just as `ru` does.
+
+It is a one-off cost rather than a per-run one. The eviction is recorded against the language that
+made it, so the next run can see that the model has already been asked about this exact English
+and that the file already holds a real translation — and accepts it instead of paying again. A
+target file holding the English source is never accepted; that value has to be retried, which is
+the whole point of the eviction.
 
 ### What is never reported as a leak
 

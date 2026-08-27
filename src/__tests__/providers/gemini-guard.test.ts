@@ -329,6 +329,32 @@ describe("byte-identical output reaches the cache decision", () => {
 
     expect(result.output["nav.overview"]).toBe("生产商仪表板");
     expect(result.failed).toBe(0);
+    // The Chinese on disk is a real translation of the CURRENT English, and the
+    // model just proved it cannot beat it. Asking again every run is pure cost,
+    // so the key is cached — but marked `accepted` for zh alone (CEL-1543), not
+    // silently promoted to a clean translation.
+    expect(result.acceptedSourceKeys).toEqual(["nav.overview"]);
+    expect(result.staleSourceKeys).toEqual([]);
+    expect("nav.overview" in result.newCacheEntries).toBe(true);
+  });
+
+  it("still evicts when the previous translation IS the English source", async () => {
+    // Anti-vacuity for the accept above: the whole point of the eviction is
+    // that English on disk has to be retried, and accepting it would re-open
+    // the CEL-1539 hole in one line.
+    respondWith(JSON.stringify({ "nav.overview": "Producer dashboard" }));
+
+    const result = await translateNamespace({
+      sourceFlat: { "nav.overview": "Producer dashboard" },
+      targetFlat: { "nav.overview": "Producer dashboard" },
+      cacheEntries: {},
+      provider: provider(),
+      targetLang: "zh",
+      force: true,
+    });
+
+    expect(result.acceptedSourceKeys).toEqual([]);
+    expect(result.staleSourceKeys).toEqual(["nav.overview"]);
     expect("nav.overview" in result.newCacheEntries).toBe(false);
   });
 });
@@ -498,14 +524,18 @@ describe("GeminiProvider.translate — a corroborated uniform echo", () => {
 });
 
 /**
- * CEL-1542, P3 — the documented cost, pinned so it cannot change unnoticed.
+ * CEL-1542 P3, revised by CEL-1543 — the documented cost, pinned so it cannot
+ * change unnoticed.
  *
- * A group that is uniform BY NECESSITY can never stop being suspect, so every
- * run spends one corrective retry on it and then evicts it from the cache. The
- * alternative is caching a value indistinguishable from a real
- * under-differentiation, which is the CEL-1539 defect.
+ * A group that is uniform BY NECESSITY can never stop being suspect, so the
+ * FIRST run that meets it spends one corrective retry and then evicts it: the
+ * value is indistinguishable from a real under-differentiation, and caching it
+ * blind is the CEL-1539 defect. What changed is that the eviction is now
+ * recorded per language instead of deleted, so the next run can tell "the model
+ * already tried this exact English and the file already holds the answer" from
+ * "the English moved" — and stops paying.
  */
-describe("a correct-by-necessity uniform group pays the same cost on every run", () => {
+describe("a correct-by-necessity uniform group costs one round, not one per run", () => {
   const uniform = JSON.stringify({
     "volume.ml_one": "{{count}} мл",
     "volume.ml_few": "{{count}} мл",
@@ -525,7 +555,7 @@ describe("a correct-by-necessity uniform group pays the same cost on every run",
     });
   };
 
-  it("retries and evicts again even when the file already holds the answer", async () => {
+  it("retries and evicts on the first encounter", async () => {
     const settled = {
       "volume.ml_one": "{{count}} мл",
       "volume.ml_few": "{{count}} мл",
@@ -535,14 +565,42 @@ describe("a correct-by-necessity uniform group pays the same cost on every run",
 
     const result = await run(settled);
 
-    // One first pass plus one corrective retry — every run, for as long as the
-    // key exists.
+    // One first pass plus one corrective retry.
     expect(generateContent).toHaveBeenCalledTimes(2);
     // Never a failure, and the right value is written.
     expect(result.failed).toBe(0);
     expect(result.output["volume.ml_many"]).toBe("{{count}} мл");
-    // Evicted, so the next run repeats the whole thing.
+    // Evicted: nothing on the record says the model has already been asked
+    // about THIS English, so the retry has to stay available.
     expect(Object.keys(result.newCacheEntries)).toEqual([]);
+    expect(result.staleSourceKeys).toEqual(["volume.ml_other"]);
+  });
+
+  it("stops paying once the eviction it wrote is on the record", async () => {
+    const settled = {
+      "volume.ml_one": "{{count}} мл",
+      "volume.ml_few": "{{count}} мл",
+      "volume.ml_many": "{{count}} мл",
+      "volume.ml_other": "{{count}} мл",
+    };
+    respondWith(uniform, uniform);
+
+    const result = await translateNamespace({
+      sourceFlat: { "volume.ml_other": "{{count}} ml" },
+      targetFlat: settled,
+      cacheEntries: {},
+      // What the per-language cache adds: this key was evicted by ru at this
+      // exact English text, so the Russian on disk still answers it.
+      retriedSourceKeys: new Set(["volume.ml_other"]),
+      provider: provider(),
+      targetLang: "ru",
+      force: false,
+    });
+
+    expect(result.output["volume.ml_many"]).toBe("{{count}} мл");
+    expect(result.acceptedSourceKeys).toEqual(["volume.ml_other"]);
+    expect(result.staleSourceKeys).toEqual([]);
+    expect(result.newCacheEntries["volume.ml_other"]).toBeDefined();
   });
 
   it("costs a Latin-script language the same — the check is outside the script gate", async () => {

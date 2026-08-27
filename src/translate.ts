@@ -8,19 +8,32 @@ import {
 } from "node:fs";
 import { join, dirname, basename } from "node:path";
 import { flattenJSON, unflattenJSON } from "./json-utils.js";
-import { computeDiff, buildCacheEntries, type DiffResult } from "./cache.js";
+import {
+  computeDiff,
+  buildCacheEntries,
+  mergeNamespaceCache,
+  pendingRetryKeys,
+  viewForLanguage,
+  type DiffResult,
+  type FullCache,
+} from "./cache.js";
 import { chunkEntries } from "./chunk.js";
 import { validatePlaceholders } from "./placeholder.js";
 import {
+  classifyIncompletePluralGroups,
   collectPluralGroups,
   expandPluralFallback,
   incompletePluralSourceKeys,
   indexGroupsBySourceKey,
+  isEnglishFallbackGroup,
+  rejectedPluralBases,
   representativeKey,
   sourceFormFor,
   splitPluralKey,
   toPluralExpansion,
+  PLURAL_CATEGORIES,
   type PluralGroup,
+  type PluralRejectReason,
 } from "./plurals.js";
 import type {
   TranslationProvider,
@@ -73,6 +86,19 @@ export interface NamespaceResult {
   output: Record<string, string>;
   newCacheEntries: Record<string, string>;
   /**
+   * SOURCE keys this language must retry on the next run — it failed them, or
+   * degraded them with nothing better already on disk. Recorded per language so
+   * the eviction survives the process: the whole point of CEL-1543.
+   */
+  staleSourceKeys: string[];
+  /**
+   * SOURCE keys this language has stopped asking about: it attempted them and
+   * could not improve on what the target file already holds. Cached like a
+   * clean key, and carried forward untouched by any run that does not
+   * re-attempt them.
+   */
+  acceptedSourceKeys: string[];
+  /**
    * Key order for the written file: English source order, with each plural
    * group replaced by the full category set the target language needs. This is
    * a superset of `Object.keys(sourceFlat)` — the target may carry plural
@@ -80,6 +106,12 @@ export interface NamespaceResult {
    */
   outputKeyOrder: string[];
 }
+
+const REJECT_DETAIL: Record<PluralRejectReason, string> = {
+  "no-other-variant": 'no "_other" variant, which i18next requires',
+  "lone-other-without-count":
+    'a lone "_other" with no count placeholder — an enum member, not a plural',
+};
 
 const CHUNK_SIZE = 30;
 const CHUNK_DELAY_MS = 2000;
@@ -144,6 +176,22 @@ export async function translateNamespace(opts: {
   targetLang: string;
   force: boolean;
   context?: string;
+  /**
+   * Source keys this language already accepted a flagged value for, at the hash
+   * `cacheEntries` carries. They are cached like any other key, and they
+   * additionally suppress the English-fallback plural re-queue that would
+   * otherwise retranslate the group on every run forever.
+   */
+  cachedAcceptedKeys?: ReadonlySet<string>;
+  /**
+   * Source keys this language evicted on an earlier run AT THE SAME English
+   * text. `computeDiff` reports those as `changed` — it sees no cached hash and
+   * cannot tell why — but the distinction matters: a previous translation is
+   * still an answer to the current source, so a value the provider degrades on
+   * this attempt may be accepted. A key whose English genuinely changed is not
+   * eligible, because the translation on disk renders text that is gone.
+   */
+  retriedSourceKeys?: ReadonlySet<string>;
 }): Promise<NamespaceResult> {
   const {
     sourceFlat,
@@ -154,6 +202,8 @@ export async function translateNamespace(opts: {
     force,
     context,
   } = opts;
+  const cachedAccepted = opts.cachedAcceptedKeys ?? new Set<string>();
+  const retriedKeys = opts.retriedSourceKeys ?? new Set<string>();
 
   // Plural groups are collected for EVERY provider. Only a provider that opts
   // in has them expanded into the request; the rest of the run still needs the
@@ -164,6 +214,36 @@ export async function translateNamespace(opts: {
     ? pluralGroups
     : new Map<string, PluralGroup>();
   const groupBySourceKey = indexGroupsBySourceKey(expansionGroups);
+
+  const output: Record<string, string> = {};
+  const warnings: string[] = [];
+  const errors: string[] = [];
+  let failedKeys = 0;
+
+  // A base the plural guards reject keeps its own key, but any sibling an
+  // earlier run invented for it (`_one`, `_few`, `_many`) has no source key and
+  // belongs to no group, so the writer drops it. Correct — i18next would serve
+  // those for every count that is not "other" — but it used to happen in total
+  // silence, and a locale losing keys deserves a line of output.
+  for (const [base, reason] of rejectedPluralBases(sourceFlat)) {
+    const orphans = PLURAL_CATEGORIES.map(
+      (category) => `${base}_${category}`
+    ).filter((key) => key in targetFlat && !(key in sourceFlat));
+    if (orphans.length === 0) continue;
+    warnings.push(
+      `"${base}" is not a plural group (${REJECT_DETAIL[reason]}); ` +
+        `dropping ${orphans.length} stale sibling(s) from the ${targetLang} file: ` +
+        orphans.join(", ")
+    );
+  }
+
+  // Groups whose target file reproduces the English source verbatim, as they
+  // stand BEFORE this run touches anything. Held separately so a group that
+  // comes back English a SECOND time can be recognised as converged rather than
+  // re-queued on every run forever (see the acceptance pass below).
+  const preRunFallback = new Set(
+    classifyIncompletePluralGroups(targetFlat, expansionGroups).englishFallback
+  );
 
   let keysToTranslate: string[];
   let diff: DiffResult;
@@ -184,7 +264,8 @@ export async function translateNamespace(opts: {
     const queued = new Set(keysToTranslate);
     const incomplete = incompletePluralSourceKeys(
       targetFlat,
-      expansionGroups
+      expansionGroups,
+      cachedAccepted
     ).filter((key) => {
       if (queued.has(key)) return false;
       queued.add(key);
@@ -202,10 +283,14 @@ export async function translateNamespace(opts: {
     }
   }
 
-  const output: Record<string, string> = {};
-  const warnings: string[] = [];
-  const errors: string[] = [];
-  let failedKeys = 0;
+  /**
+   * True when the English text behind `key` is the same text the translation on
+   * disk was made from. `diff.changed` alone cannot answer that: a key an
+   * earlier run evicted lands there too, with its English untouched.
+   */
+  const changedKeys = new Set(diff.changed);
+  const sourceStillMatchesDisk = (key: string): boolean =>
+    !changedKeys.has(key) || retriedKeys.has(key);
 
   // Carry over unchanged translations
   for (const key of diff.unchanged) {
@@ -247,16 +332,23 @@ export async function translateNamespace(opts: {
 
   const outputKeyOrder = buildOutputKeyOrder(sourceFlat, pluralGroups);
 
+  /** Accepts this run did not re-evaluate survive untouched. */
+  const carriedAccepts = [...cachedAccepted].filter(
+    (key) => key in sourceFlat && !retranslating.has(key)
+  );
+
   if (keysToTranslate.length === 0) {
     return {
       translated: 0,
       skipped: diff.unchanged.length,
       changed: 0,
       failed: 0,
-      warnings: [],
+      warnings,
       errors: [],
       output,
       newCacheEntries: buildCacheEntries(sourceFlat),
+      staleSourceKeys: [],
+      acceptedSourceKeys: carriedAccepts,
       outputKeyOrder,
     };
   }
@@ -285,9 +377,16 @@ export async function translateNamespace(opts: {
   const chunks = chunkEntries(entries, CHUNK_SIZE);
   const translatedEntries: TranslationEntry[] = [];
   const failedSourceKeys = new Set<string>();
-  // Degraded keys are not failures, but they still leave the cache so the next
-  // run gets another attempt at a real translation.
+  // Every degraded source key — the unit the summary counts, because a degraded
+  // key never received a fresh translation whatever the cache then does with it.
   const degradedSourceKeys = new Set<string>();
+  // A degraded key normally leaves the cache so the next run tries again. These
+  // are the ones where the target file already holds a better answer than the
+  // provider can produce, so asking again is pure cost. Per language, so one
+  // language's decision to stop asking says nothing about the others.
+  const acceptedSourceKeys = new Set<string>();
+  /** Degraded keys that must keep their eviction — the accept did not apply. */
+  const retrySourceKeys = new Set<string>();
   const startTime = Date.now();
 
   for (let i = 0; i < chunks.length; i++) {
@@ -380,9 +479,28 @@ export async function translateNamespace(opts: {
         `Key "${entry.key}": ${entry.degraded.reason} — ${entry.degraded.detail}; ` +
           (keepPrevious ? "kept the previous translation" : "wrote it anyway")
       );
-      // Left out of the cache so the next run gets another chance at it.
+
+      // Whether to ask again next run. A previous translation that is NOT the
+      // English source is already a better answer than this attempt produced,
+      // and the source has not moved since it was made — so the model would see
+      // exactly the input that just degraded, and a uniform group like
+      // `{{count}} мл` would burn a retry and a retranslation on every run
+      // forever. Remembering the accept per language is what CEL-1543's cache
+      // dimension makes possible; `--force` or an edit to the English asks
+      // again. Anything else keeps its eviction: English on disk, or a
+      // translation of English text that is gone, must be retried.
+      const english = resolveSourceValue(entry.key, sourceFlat, pluralGroups);
+      const previousBeatsThis = keepPrevious && previous !== english;
       for (const key of sourceKeysFor(entry.key, sourceFlat, pluralGroups)) {
         degradedSourceKeys.add(key);
+        if (previousBeatsThis && sourceStillMatchesDisk(key)) {
+          acceptedSourceKeys.add(key);
+        } else {
+          // A plural group reaches this loop once per emitted category, so one
+          // category with English on disk evicts the whole group even if
+          // another category would have been accepted.
+          retrySourceKeys.add(key);
+        }
       }
       continue;
     }
@@ -393,11 +511,48 @@ export async function translateNamespace(opts: {
     warnings.push(...validatePlaceholders(source, entry.value, entry.key));
   }
 
+  // A plural group that arrived as the English source verbatim was re-queued to
+  // be translated again. When the retry hands back the English source AGAIN,
+  // asking a third time cannot change the answer — every future run would
+  // re-queue it, retranslate it and get the same bytes, at full API cost and
+  // with an LLM-nondeterministic value each time. The group is accepted for
+  // THIS language at THIS source hash; editing the English or passing --force
+  // asks again.
+  //
+  // Only reachable where the leak guard did not object: a Latin-script target,
+  // which it deliberately does not judge, or a group it waved through. Anything
+  // it flagged sits in `failedSourceKeys` or `degradedSourceKeys` and is
+  // excluded here.
+  for (const group of expansionGroups.values()) {
+    if (!group.sourceKeys.some((key) => preRunFallback.has(key))) continue;
+    if (!group.sourceKeys.some((key) => retranslating.has(key))) continue;
+    if (
+      group.sourceKeys.some(
+        (key) => failedSourceKeys.has(key) || degradedSourceKeys.has(key)
+      )
+    ) {
+      continue;
+    }
+    if (!isEnglishFallbackGroup(output, group)) continue;
+    warnings.push(
+      `Plural group "${group.base}": the retranslation returned the English ` +
+        `source again — accepted for ${targetLang} and cached; run with ` +
+        `--force to ask again`
+    );
+    for (const key of group.sourceKeys) acceptedSourceKeys.add(key);
+  }
+
   // A failed key must NOT be cached as translated, or the next run would see
-  // the source hash unchanged and skip it forever.
+  // the source hash unchanged and skip it forever. An eviction always beats an
+  // accept.
+  const staleSourceKeys = new Set([...failedSourceKeys, ...retrySourceKeys]);
+  for (const key of staleSourceKeys) acceptedSourceKeys.delete(key);
+  for (const key of carriedAccepts) {
+    if (!staleSourceKeys.has(key)) acceptedSourceKeys.add(key);
+  }
+
   const newCacheEntries = buildCacheEntries(sourceFlat);
-  for (const key of failedSourceKeys) delete newCacheEntries[key];
-  for (const key of degradedSourceKeys) delete newCacheEntries[key];
+  for (const key of staleSourceKeys) delete newCacheEntries[key];
 
   // UNITS. `translated`, `changed` and `skipped` count SOURCE keys; `failed`
   // counts EMITTED keys, because that is the number of locale entries a reader
@@ -433,6 +588,8 @@ export async function translateNamespace(opts: {
     errors,
     output,
     newCacheEntries,
+    staleSourceKeys: [...staleSourceKeys],
+    acceptedSourceKeys: [...acceptedSourceKeys],
     outputKeyOrder,
   };
 }
@@ -500,24 +657,15 @@ export async function translate(
     files: [],
   };
 
-  // Load cache
-  let fullCache: Record<string, Record<string, string>> = {};
+  // Load cache. Entries come in either shape: a bare hash written by 0.3.x
+  // (language-independent, read as cached everywhere) or a `{ hash, langs }`
+  // record with this format's per-language exceptions. Nothing needs migrating
+  // up front — a namespace upgrades itself the first time a language records an
+  // exception on one of its keys, and stays a plain hash map otherwise.
+  let fullCache: FullCache = {};
   if (cacheFilePath && existsSync(cacheFilePath)) {
     fullCache = JSON.parse(readFileSync(cacheFilePath, "utf-8"));
   }
-
-  /**
-   * Keys evicted from the cache by ANY language, per namespace.
-   *
-   * The cache is namespace-scoped and language-INDEPENDENT: one map of source
-   * hashes per file, rewritten once per language in the loop below. An eviction
-   * is a property of the namespace, not of the language that found it — without
-   * this union, a later language re-added a key an earlier one had degraded,
-   * and the next run saw an unchanged hash and skipped the English value it had
-   * just written. That is the "complete, never retried" hole (CEL-1533), and no
-   * plural-completeness check can see it: the file has every category it needs.
-   */
-  const evictedPerNamespace = new Map<string, Set<string>>();
 
   // Collect source files
   const sourceFiles: { name: string; path: string }[] = [];
@@ -584,10 +732,12 @@ export async function translate(
       }
 
       const cacheKey = sourceFile.name;
-      const cacheEntries = fullCache[cacheKey] ?? {};
+      const namespaceCache = fullCache[cacheKey] ?? {};
+      const cacheView = viewForLanguage(namespaceCache, lang);
+      const retriedSourceKeys = pendingRetryKeys(cacheView, sourceFlat);
 
       if (dryRun) {
-        const diff = computeDiff(sourceFlat, targetFlat, cacheEntries);
+        const diff = computeDiff(sourceFlat, targetFlat, cacheView.hashes);
         // Mirror translateNamespace: incomplete plural groups are work too.
         const pluralGroups = provider.supportsPluralExpansion
           ? collectPluralGroups(sourceFlat, lang)
@@ -595,7 +745,8 @@ export async function translate(
         const queued = new Set([...diff.missing, ...diff.changed]);
         const incomplete = incompletePluralSourceKeys(
           targetFlat,
-          pluralGroups
+          pluralGroups,
+          cacheView.accepted
         ).filter((key) => !queued.has(key));
         const toTranslate = force
           ? Object.keys(sourceFlat).length
@@ -614,7 +765,9 @@ export async function translate(
       const result = await translateNamespace({
         sourceFlat,
         targetFlat,
-        cacheEntries,
+        cacheEntries: cacheView.hashes,
+        cachedAcceptedKeys: cacheView.accepted,
+        retriedSourceKeys,
         provider,
         targetLang: lang,
         force,
@@ -632,18 +785,17 @@ export async function translate(
       const outputJSON = unflattenJSON(orderedOutput);
       writeFileSync(outputPath, JSON.stringify(outputJSON, null, 2) + "\n");
 
-      // Update cache. A key any language dropped stays dropped for the whole
-      // namespace, so the language that degraded it gets its retry next run.
-      let evicted = evictedPerNamespace.get(cacheKey);
-      if (!evicted) {
-        evicted = new Set<string>();
-        evictedPerNamespace.set(cacheKey, evicted);
-      }
-      for (const key of Object.keys(sourceFlat)) {
-        if (!(key in result.newCacheEntries)) evicted.add(key);
-      }
-      fullCache[cacheKey] = result.newCacheEntries;
-      for (const key of evicted) delete fullCache[cacheKey][key];
+      // Update cache. Only THIS language's state is touched: an eviction it
+      // records is written against `lang` and every other language keeps what
+      // it had, so a later language can no longer re-cache what an earlier one
+      // degraded — and, unlike the in-memory union this replaced, the eviction
+      // survives the process. Running `-o zh` and then `-o ru` as two separate
+      // invocations now behaves exactly like `-o zh,ru` (CEL-1543).
+      fullCache[cacheKey] = mergeNamespaceCache(namespaceCache, lang, {
+        hashes: buildCacheEntries(sourceFlat),
+        stale: result.staleSourceKeys,
+        accepted: result.acceptedSourceKeys,
+      });
 
       totalResult.translated += result.translated;
       totalResult.skipped += result.skipped;

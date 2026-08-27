@@ -56,7 +56,31 @@ The action creates a PR with translated files. Consumer workflow needs `contents
 
 ## Incremental cache
 
-`.polyglot-cache.json` tracks per-key SHA hashes of the English source. Only changed keys are retranslated. **ALWAYS commit the cache file** — it prevents the CI pipeline from clobbering manual translation fixes.
+`.polyglot-cache.json` tracks per-key SHA hashes of the English source. Only changed keys are
+retranslated. **ALWAYS commit the cache file** — it prevents the CI pipeline from clobbering
+manual translation fixes.
+
+The cache has a **language dimension** since 0.4.0 (CEL-1543). An entry is either a bare hash —
+what every version up to 0.3.2 wrote, read as "cached for every language" — or
+`{ hash, langs: { zh: "stale" | "accepted" } }`. Only exceptions are recorded, so an all-clean
+namespace stays a plain hash map and existing cache files need no migration; a key upgrades to the
+record shape the first time a language deviates on it, and reverts when the exception clears.
+
+Two rules hold the whole design up:
+
+- **A language is cached unless it says otherwise.** Safe because a language with no value on disk
+  is classified `missing` by `computeDiff` before the cache is consulted, so "cached" can only be
+  reached by a language that already has one.
+- **`mergeNamespaceCache` touches one language.** 0.3.x rewrote the whole namespace on each
+  language's turn and held the union of every eviction in memory, so the eviction died with the
+  process: `-o zh` then `-o ru` as two commands put the key back and cached a value nothing had
+  vouched for. It also billed every other language for a retranslation it did not need.
+
+`accepted` is the mitigation the dimension unlocks: a key whose target file already holds a better
+answer than the provider can produce (a uniform `{{count}} мл` group, an English-verbatim group on
+a Latin-script target) stops being retried, for that language, at that source hash. It expires on
+any English edit and is bypassed by `--force`. Both eviction and accept are per language by
+construction — `staleSourceKeys` / `acceptedSourceKeys` on `NamespaceResult`.
 
 ## Structure
 
@@ -66,7 +90,7 @@ src/
 ├── index.ts           # Public API
 ├── translate.ts       # Core translation loop
 ├── chunk.ts           # Batch keys to respect provider token limits
-├── cache.ts           # .polyglot-cache.json read/write
+├── cache.ts           # .polyglot-cache.json read/write + per-language resolution
 ├── json-utils.ts      # Recursive JSON walking (preserves nesting)
 ├── placeholder.ts     # Protect {{variables}}, plurals (_one/_other), HTML tags
 ├── plurals.ts         # CLDR plural groups + Intl.PluralRules category resolution

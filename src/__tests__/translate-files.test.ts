@@ -3,6 +3,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { translate } from "../translate.js";
+import { hashValue } from "../cache.js";
 import type {
   TranslationEntry,
   TranslationProvider,
@@ -233,10 +234,15 @@ describe("translate — a cache eviction holds across every language in the run"
     });
 
     const cache = JSON.parse(readFileSync(cacheFile, "utf-8"));
-    expect("save" in cache["common.json"]).toBe(false);
+    // The eviction is now recorded AGAINST zh rather than by deleting the key,
+    // so ru's write cannot undo it and ru keeps its own cache (CEL-1543).
+    expect(cache["common.json"].save).toEqual({
+      hash: hashValue(SOURCE.save),
+      langs: { zh: "stale" },
+    });
     // Anti-vacuity: the rest of the namespace IS cached, so this is an
     // eviction rather than a cache that was never written.
-    expect("cancel" in cache["common.json"]).toBe(true);
+    expect(cache["common.json"].cancel).toBe(hashValue(SOURCE.cancel));
   });
 
   it("caches everything when no language degrades anything", async () => {
@@ -256,5 +262,396 @@ describe("translate — a cache eviction holds across every language in the run"
       "item_other",
       "save",
     ]);
+  });
+});
+
+/** Plural-aware, records what it was asked for, returns `[lang] …`. */
+function spyProvider(): TranslationProvider & {
+  translate: ReturnType<typeof vi.fn>;
+} {
+  return {
+    name: "mock-spy",
+    supportsPluralExpansion: true,
+    translate: vi.fn(async (entries: TranslationEntry[], lang: string) =>
+      entries.flatMap((e) =>
+        e.plural
+          ? e.plural.targetCategories.map((c) => ({
+              key: `${e.plural!.base}_${c}`,
+              value: `[${lang}:${c}]`,
+            }))
+          : [{ key: e.key, value: `[${lang}] ${e.value}` }]
+      )
+    ),
+  } as TranslationProvider & { translate: ReturnType<typeof vi.fn> };
+}
+
+/** Every source key a spy provider was asked for, across all its chunks. */
+function askedKeys(spy: { translate: ReturnType<typeof vi.fn> }): string[] {
+  return spy.translate.mock.calls.flatMap((call: [TranslationEntry[], string]) =>
+    call[0].map((e) => e.key)
+  );
+}
+
+function readCache(file: string): Record<string, Record<string, unknown>> {
+  return JSON.parse(readFileSync(file, "utf-8"));
+}
+
+function writeTarget(lang: string, values: Record<string, string>): void {
+  mkdirSync(join(root, lang), { recursive: true });
+  writeFileSync(
+    join(root, lang, "common.json"),
+    JSON.stringify(values, null, 2) + "\n"
+  );
+}
+
+/**
+ * CEL-1543 #1 and #2.
+ *
+ * The eviction union that closed CEL-1533 lived in memory for the length of one
+ * `translate()` call, so it could only hold across the languages of a SINGLE
+ * invocation. The README's own workflow — `-o zh`, then `-o ru` — put the key
+ * back on the second command, restoring the "cached forever" hole; and because
+ * the union deleted the key for everybody, one language's eviction also billed
+ * every other language for a retranslation it did not need.
+ */
+describe("translate — a cache eviction is per language and survives the process", () => {
+  function degradingFor(lang: string): TranslationProvider {
+    return {
+      name: "mock-degrading",
+      supportsPluralExpansion: true,
+      translate: async (entries: TranslationEntry[], target: string) =>
+        entries.flatMap((e) => {
+          const keys = e.plural
+            ? e.plural.targetCategories.map((c) => `${e.plural!.base}_${c}`)
+            : [e.key];
+          return keys.map((key) => ({
+            key,
+            value: `[${target}] ${e.value}`,
+            ...(target === lang && e.key === "save"
+              ? {
+                  degraded: {
+                    reason: "identical-to-source",
+                    detail: "value is the English source verbatim",
+                  },
+                }
+              : {}),
+          }));
+        }),
+    };
+  }
+
+  it("keeps zh's eviction when ru runs as a SEPARATE invocation", async () => {
+    const cacheFile = join(root, ".polyglot-cache.json");
+
+    await translate({
+      input: enDir,
+      outputLanguages: ["zh"],
+      provider: degradingFor("zh"),
+      cacheFile,
+    });
+    expect(readCache(cacheFile)["common.json"].save).toEqual({
+      hash: hashValue(SOURCE.save),
+      langs: { zh: "stale" },
+    });
+
+    // A second command, a fresh process as far as the cache is concerned.
+    await translate({
+      input: enDir,
+      outputLanguages: ["ru"],
+      provider: pluralAwareProvider(),
+      cacheFile,
+    });
+
+    // ru's write must not put zh's key back.
+    expect(readCache(cacheFile)["common.json"].save).toEqual({
+      hash: hashValue(SOURCE.save),
+      langs: { zh: "stale" },
+    });
+
+    const third = spyProvider();
+    await translate({
+      input: enDir,
+      outputLanguages: ["zh"],
+      provider: third,
+      cacheFile,
+    });
+
+    expect(askedKeys(third)).toContain("save");
+  });
+
+  it("does not bill ru for a retranslation because zh evicted a key", async () => {
+    const cacheFile = join(root, ".polyglot-cache.json");
+
+    await translate({
+      input: enDir,
+      outputLanguages: ["zh", "ru"],
+      provider: degradingFor("zh"),
+      cacheFile,
+    });
+
+    const second = spyProvider();
+    await translate({
+      input: enDir,
+      outputLanguages: ["ru"],
+      provider: second,
+      cacheFile,
+    });
+
+    // Deleting the key for everybody made `save` look `changed` to ru on every
+    // subsequent run, with an LLM-nondeterministic value each time.
+    expect(second.translate).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * CEL-1543: the read path has to accept `{ namespace: { sourceKey: hash } }`
+ * files written by every published version up to 0.3.2, and upgrade them a key
+ * at a time rather than all at once.
+ */
+describe("translate — a 0.3.x cache file loads and migrates in place", () => {
+  const LEGACY = {
+    "common.json": {
+      save: hashValue(SOURCE.save),
+      item_one: hashValue(SOURCE.item_one),
+      item_other: hashValue(SOURCE.item_other),
+      cancel: hashValue(SOURCE.cancel),
+    },
+  };
+
+  it("skips everything the old format said was done", async () => {
+    const cacheFile = join(root, ".polyglot-cache.json");
+    writeFileSync(cacheFile, JSON.stringify(LEGACY, null, 2) + "\n");
+    writeTarget("zh", {
+      save: "保存",
+      item_one: "{{count}} 件",
+      item_other: "{{count}} 件",
+      cancel: "取消",
+    });
+
+    const provider = spyProvider();
+    const result = await translate({
+      input: enDir,
+      outputLanguages: ["zh"],
+      provider,
+      cacheFile,
+    });
+
+    expect(provider.translate).not.toHaveBeenCalled();
+    expect(result.skipped).toBe(4);
+    // Nothing needed an exception, so nothing grew one.
+    expect(readCache(cacheFile)).toEqual(LEGACY);
+  });
+
+  it("upgrades only the entry a language has an exception for", async () => {
+    const cacheFile = join(root, ".polyglot-cache.json");
+    writeFileSync(cacheFile, JSON.stringify(LEGACY, null, 2) + "\n");
+    // `save` is absent from the zh file, so it is retranslated despite the
+    // legacy cache claiming it is done — and this provider degrades it.
+    writeTarget("zh", {
+      item_one: "{{count}} 件",
+      item_other: "{{count}} 件",
+      cancel: "取消",
+    });
+
+    await translate({
+      input: enDir,
+      outputLanguages: ["zh"],
+      provider: {
+        name: "degrades-save",
+        supportsPluralExpansion: true,
+        translate: async (entries: TranslationEntry[]) =>
+          entries.map((e) => ({
+            key: e.key,
+            value: e.value,
+            degraded: { reason: "identical-to-source", detail: "verbatim" },
+          })),
+      },
+      cacheFile,
+    });
+
+    const namespace = readCache(cacheFile)["common.json"];
+    expect(namespace.save).toEqual({
+      hash: hashValue(SOURCE.save),
+      langs: { zh: "stale" },
+    });
+    // The untouched keys keep the legacy shape — migration is incremental.
+    expect(namespace.cancel).toBe(hashValue(SOURCE.cancel));
+    expect(namespace.item_one).toBe(hashValue(SOURCE.item_one));
+  });
+});
+
+/**
+ * CEL-1543: the perpetual-cost mitigation the language dimension unlocks.
+ *
+ * A plural group whose target reproduces the English source verbatim is
+ * regenerated without `--force` (CEL-1533). On a Latin-script target the leak
+ * guard deliberately does not run, so a group that is English by necessity was
+ * written, cached, re-queued, retranslated and written again on EVERY run,
+ * forever. One retry is worth paying for; an unbounded number is not.
+ */
+describe("translate — an English-verbatim plural group converges after one retry", () => {
+  /** Hands back the English source forms, exactly as they were sent. */
+  const echoing: TranslationProvider = {
+    name: "echoing",
+    supportsPluralExpansion: true,
+    translate: async (entries: TranslationEntry[], lang: string) =>
+      entries.flatMap((e) =>
+        e.plural
+          ? e.plural.targetCategories.map((c) => ({
+              key: `${e.plural!.base}_${c}`,
+              value: e.plural!.sourceForms[c] ?? e.plural!.sourceForms.other,
+            }))
+          : [{ key: e.key, value: `[${lang}] ${e.value}` }]
+      ),
+  };
+
+  function seedEnglishFallback(cacheFile: string): void {
+    writeFileSync(
+      cacheFile,
+      JSON.stringify(
+        {
+          "common.json": {
+            save: hashValue(SOURCE.save),
+            item_one: hashValue(SOURCE.item_one),
+            item_other: hashValue(SOURCE.item_other),
+            cancel: hashValue(SOURCE.cancel),
+          },
+        },
+        null,
+        2
+      ) + "\n"
+    );
+    writeTarget("de", {
+      save: "Speichern",
+      item_one: SOURCE.item_one,
+      item_other: SOURCE.item_other,
+      cancel: "Abbrechen",
+    });
+  }
+
+  it("asks once, then records the accept for that language and stops", async () => {
+    const cacheFile = join(root, ".polyglot-cache.json");
+    seedEnglishFallback(cacheFile);
+
+    const first = await translate({
+      input: enDir,
+      outputLanguages: ["de"],
+      provider: echoing,
+      cacheFile,
+    });
+
+    expect(
+      first.warnings.some(
+        (w) => w.includes("item") && w.includes("English source again")
+      )
+    ).toBe(true);
+
+    const namespace = readCache(cacheFile)["common.json"];
+    expect(namespace.item_other).toEqual({
+      hash: hashValue(SOURCE.item_other),
+      langs: { de: "accepted" },
+    });
+    // Per language: ru has accepted nothing and would still be asked.
+    expect(namespace.item_one).toEqual({
+      hash: hashValue(SOURCE.item_one),
+      langs: { de: "accepted" },
+    });
+
+    const second = spyProvider();
+    await translate({
+      input: enDir,
+      outputLanguages: ["de"],
+      provider: second,
+      cacheFile,
+    });
+
+    expect(second.translate).not.toHaveBeenCalled();
+  });
+
+  it("asks again after --force, and after the English changes", async () => {
+    const cacheFile = join(root, ".polyglot-cache.json");
+    seedEnglishFallback(cacheFile);
+
+    await translate({
+      input: enDir,
+      outputLanguages: ["de"],
+      provider: echoing,
+      cacheFile,
+    });
+
+    const forced = spyProvider();
+    await translate({
+      input: enDir,
+      outputLanguages: ["de"],
+      provider: forced,
+      cacheFile,
+      force: true,
+    });
+    // Named specifically: `save` and `cancel` are asked for on any force run,
+    // so "the provider was called" would pass even if the accept had silenced
+    // the group it is supposed to re-open.
+    expect(askedKeys(forced)).toContain("item_other");
+
+    // An accept is written against one source hash, so new English text asks
+    // again with no flag at all. The cache is left exactly as the runs above
+    // wrote it — accepted for de — so this really is the marker expiring.
+    writeFileSync(
+      join(enDir, "common.json"),
+      JSON.stringify({ ...SOURCE, item_other: "{{count}} products" }, null, 2) +
+        "\n"
+    );
+
+    const edited = spyProvider();
+    await translate({
+      input: enDir,
+      outputLanguages: ["de"],
+      provider: edited,
+      cacheFile,
+    });
+
+    expect(askedKeys(edited)).toContain("item_other");
+  });
+});
+
+/**
+ * CEL-1543 P3. A base the plural guards reject (`kind_other`: "Document" — a
+ * lone `_other` with no count placeholder) keeps its own key, but a `_one` an
+ * earlier run invented for it has no source key and belongs to no group, so the
+ * writer drops it. Right outcome, previously zero output.
+ */
+describe("translate — dropping a stale plural sibling is announced", () => {
+  it("names the keys it is about to remove", async () => {
+    const src = join(root, "en", "enums.json");
+    writeFileSync(
+      src,
+      JSON.stringify({ kind_other: "Document", save: "Save" }, null, 2) + "\n"
+    );
+    mkdirSync(join(root, "zh"), { recursive: true });
+    writeFileSync(
+      join(root, "zh", "enums.json"),
+      JSON.stringify(
+        { kind_other: "其他", kind_one: "一个", save: "保存" },
+        null,
+        2
+      ) + "\n"
+    );
+
+    const result = await translate({
+      input: enDir,
+      outputLanguages: ["zh"],
+      provider: spyProvider(),
+      noCache: true,
+    });
+
+    const notice = result.warnings.find((w) => w.startsWith('"kind"'));
+    expect(notice).toBeDefined();
+    expect(notice).toContain("kind_one");
+    expect(notice).toContain("not a plural group");
+    // Anti-vacuity: the key really is gone from the written file.
+    const written = JSON.parse(
+      readFileSync(join(root, "zh", "enums.json"), "utf-8")
+    );
+    expect("kind_one" in written).toBe(false);
+    expect(written.kind_other).toBeDefined();
   });
 });

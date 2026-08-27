@@ -499,7 +499,25 @@ describe("degraded values (CEL-1539 review)", () => {
     expect(result.warnings[0]).toContain("wrote it anyway");
   });
 
-  it("leaves a degraded key out of the cache so the next run retries it", async () => {
+  it("leaves a degraded key out of the cache when English is what is on disk", async () => {
+    const result = await translateNamespace({
+      sourceFlat: { "card.beverage": "Product" },
+      targetFlat: { "card.beverage": "Product" },
+      cacheEntries: {},
+      provider: createDegradingProvider("Product"),
+      targetLang: "zh",
+      force: true,
+    });
+
+    expect("card.beverage" in result.newCacheEntries).toBe(false);
+    expect(result.staleSourceKeys).toEqual(["card.beverage"]);
+  });
+
+  it("stops asking once a real translation has beaten the degraded value", async () => {
+    // CEL-1543: the previous value is a genuine translation of the CURRENT
+    // English, so re-asking hands the model the same input that just degraded.
+    // The accept is recorded against zh alone; `--force` or an English edit
+    // asks again.
     const result = await translateNamespace({
       sourceFlat: { "card.beverage": "Product" },
       targetFlat: { "card.beverage": "产品" },
@@ -509,7 +527,61 @@ describe("degraded values (CEL-1539 review)", () => {
       force: true,
     });
 
-    expect("card.beverage" in result.newCacheEntries).toBe(false);
+    expect(result.acceptedSourceKeys).toEqual(["card.beverage"]);
+    expect(result.staleSourceKeys).toEqual([]);
+    expect(result.newCacheEntries["card.beverage"]).toBe(hashValue("Product"));
+  });
+
+  it("does not accept when the English behind the previous translation changed", async () => {
+    // The Chinese on disk renders text that is gone, so it is NOT a better
+    // answer than the attempt — it is a stale one. Keep retrying.
+    const result = await translateNamespace({
+      sourceFlat: { "card.beverage": "Beverage product" },
+      targetFlat: { "card.beverage": "产品" },
+      cacheEntries: { "card.beverage": hashValue("Product") },
+      provider: createDegradingProvider("Beverage product"),
+      targetLang: "zh",
+      force: false,
+    });
+
+    expect(result.acceptedSourceKeys).toEqual([]);
+    expect(result.staleSourceKeys).toEqual(["card.beverage"]);
+  });
+
+  it("does accept on a retry of the SAME English after an earlier eviction", async () => {
+    // Same `changed` classification as the test above — no cached hash — but
+    // the eviction, not an edit, is why. `retriedSourceKeys` is the only thing
+    // that can tell the two apart, and it is what the per-language cache buys.
+    const result = await translateNamespace({
+      sourceFlat: { "card.beverage": "Product" },
+      targetFlat: { "card.beverage": "产品" },
+      cacheEntries: {},
+      retriedSourceKeys: new Set(["card.beverage"]),
+      provider: createDegradingProvider("Product"),
+      targetLang: "zh",
+      force: false,
+    });
+
+    expect(result.acceptedSourceKeys).toEqual(["card.beverage"]);
+    expect(result.staleSourceKeys).toEqual([]);
+  });
+
+  it("carries an accept forward through a run that does not re-attempt the key", async () => {
+    const provider = createMockProvider();
+    const result = await translateNamespace({
+      sourceFlat: { "card.beverage": "Product" },
+      targetFlat: { "card.beverage": "产品" },
+      cacheEntries: { "card.beverage": hashValue("Product") },
+      cachedAcceptedKeys: new Set(["card.beverage"]),
+      provider,
+      targetLang: "zh",
+      force: false,
+    });
+
+    expect(provider.translate).not.toHaveBeenCalled();
+    // Dropped here, the marker would be gone from the merged cache and the key
+    // would go back to burning a retranslation every run.
+    expect(result.acceptedSourceKeys).toEqual(["card.beverage"]);
   });
 });
 
