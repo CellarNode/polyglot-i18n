@@ -273,8 +273,10 @@ export function classifyIncompletePluralGroups(
  * stopped asking about (see `LangCacheState`). Only the second shape honours
  * them: a group missing a category is regenerated regardless, because the file
  * is structurally wrong and one successful run fixes it. Without that, a group
- * that is English by necessity on a Latin-script target — where the leak guard
- * deliberately does not run — burned a retranslation on every run forever.
+ * that is English by necessity — a `{{count}} PDF` the leak guard examined and
+ * waved through — burned a retranslation on every run forever. On a
+ * Latin-script target the guard does not run at all, so no accept is recorded
+ * there and the re-queue is what keeps a real leak recoverable.
  */
 export function incompletePluralSourceKeys(
   targetFlat: Record<string, string>,
@@ -293,9 +295,15 @@ export function incompletePluralSourceKeys(
 }
 
 /**
- * True when the target reproduces the group's English source forms verbatim in
- * every category — the exact shape `expandPluralFallback` writes, and the shape
+ * True when the target reproduces the group's English source forms in every
+ * category — the exact shape `expandPluralFallback` writes, and the shape
  * 0.3.0 shipped to production across seven locales.
+ *
+ * Compared on TRIMMED values, the same rule the leak guard blocks on
+ * (`value.trim() === sourceText.trim()`). Providers do not trim individual
+ * values, so an English form with a stray leading space is the English source
+ * by every standard that matters — and under byte equality it was neither
+ * flagged here nor re-queued, which is silent-and-cached by whitespace.
  *
  * Requires the English source to have TWO OR MORE DISTINCT forms. One form
  * repeated across every category is what a filename, a slug or a Russian unit
@@ -305,9 +313,11 @@ export function incompletePluralSourceKeys(
  * something a real translation arrives at.
  *
  * That exemption covers only the single-form case. A multi-form group CAN be
- * English by necessity too — a Latin-script target the leak guard does not
- * judge, a brand-shaped source — so the caller is expected to stop re-queueing
- * a group that has already come back English once (`acceptedSourceKeys` above).
+ * English by necessity too — a brand-shaped source — so the caller may stop
+ * re-queueing a group that has already come back English once
+ * (`acceptedSourceKeys` above). On a Latin-script target, where the leak guard
+ * does not run and nothing has judged the value, `translateNamespace` refuses
+ * to record that accept and pays the re-queue instead.
  */
 export function isEnglishFallbackGroup(
   targetFlat: Record<string, string>,
@@ -316,8 +326,11 @@ export function isEnglishFallbackGroup(
   if (new Set(Object.values(group.sourceForms)).size < 2) return false;
   return group.targetCategories.every((category) => {
     const english = sourceFormFor(group, category);
+    const value = targetFlat[`${group.base}_${category}`];
     return (
-      english !== undefined && targetFlat[`${group.base}_${category}`] === english
+      english !== undefined &&
+      value !== undefined &&
+      value.trim() === english.trim()
     );
   });
 }

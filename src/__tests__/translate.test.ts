@@ -393,8 +393,9 @@ describe("leak-guard failures (CEL-1539)", () => {
     });
 
     expect(result.output.save).toBe("保存");
-    expect(result.newCacheEntries.save).toBe(hashValue("Save"));
-    expect("card.beverage" in result.newCacheEntries).toBe(false);
+    expect(result.staleSourceKeys).toEqual(["card.beverage"]);
+    // Anti-vacuity: the clean key really did survive the same run.
+    expect(result.sourceProvenance.save).toBe(hashValue("Save"));
   });
 
   it("invalidates the whole plural group when one category fails", async () => {
@@ -412,7 +413,7 @@ describe("leak-guard failures (CEL-1539)", () => {
     // `failed` counts emitted keys; `translated` counts source keys, and
     // `item_one`/`item_other` are the only two of those.
     expect(result.translated).toBe(0);
-    expect(Object.keys(result.newCacheEntries)).toEqual([]);
+    expect(result.staleSourceKeys.sort()).toEqual(["item_one", "item_other"]);
   });
 
   it("keeps a chunk-failure fallback from overwriting a good translation", async () => {
@@ -438,7 +439,10 @@ describe("leak-guard failures (CEL-1539)", () => {
     expect(result.output.item_one).toBe("{{count}} товар");
     expect(result.output.item_other).toBe("{{count}} товара");
     expect(result.output.item_many).toBeUndefined();
-    expect(Object.keys(result.newCacheEntries)).toEqual([]);
+    expect(result.staleSourceKeys.sort()).toEqual(["item_one", "item_other"]);
+    // The kept values answer nothing this run knows about, so the cache is told
+    // so rather than handed the current hash.
+    expect(result.sourceProvenance).toEqual({});
   });
 });
 
@@ -509,27 +513,30 @@ describe("degraded values (CEL-1539 review)", () => {
       force: true,
     });
 
-    expect("card.beverage" in result.newCacheEntries).toBe(false);
     expect(result.staleSourceKeys).toEqual(["card.beverage"]);
+    // Nothing knows what the English on disk answers, and the cache is told
+    // exactly that — a hash here would make the next run's eviction look like
+    // evidence.
+    expect("card.beverage" in result.sourceProvenance).toBe(false);
   });
 
-  it("stops asking once a real translation has beaten the degraded value", async () => {
-    // CEL-1543: the previous value is a genuine translation of the CURRENT
-    // English, so re-asking hands the model the same input that just degraded.
-    // The accept is recorded against zh alone; `--force` or an English edit
-    // asks again.
+  it("never accepts under --force, however good the previous translation is", async () => {
+    // CEL-1543 P1. `--force` is what a user reaches for to re-open a bad
+    // locale file, and 0.3.x always evicted a degraded key under it. Minting
+    // an accept here froze the key at the first degraded response instead —
+    // the opposite direction for the one command that exists to recover.
     const result = await translateNamespace({
       sourceFlat: { "card.beverage": "Product" },
       targetFlat: { "card.beverage": "产品" },
       cacheEntries: {},
+      retriedSourceKeys: new Set(["card.beverage"]),
       provider: createDegradingProvider("Product"),
       targetLang: "zh",
       force: true,
     });
 
-    expect(result.acceptedSourceKeys).toEqual(["card.beverage"]);
-    expect(result.staleSourceKeys).toEqual([]);
-    expect(result.newCacheEntries["card.beverage"]).toBe(hashValue("Product"));
+    expect(result.acceptedSourceKeys).toEqual([]);
+    expect(result.staleSourceKeys).toEqual(["card.beverage"]);
   });
 
   it("does not accept when the English behind the previous translation changed", async () => {
@@ -546,10 +553,34 @@ describe("degraded values (CEL-1539 review)", () => {
 
     expect(result.acceptedSourceKeys).toEqual([]);
     expect(result.staleSourceKeys).toEqual(["card.beverage"]);
+    // And the eviction goes on the record stamped with the text the Chinese
+    // ANSWERS, not the text being translated — otherwise the next run reads it
+    // as "already asked about this exact English" and accepts it (CEL-1543).
+    expect(result.sourceProvenance["card.beverage"]).toBe(hashValue("Product"));
+    expect(result.sourceProvenance["card.beverage"]).not.toBe(
+      hashValue("Beverage product")
+    );
+  });
+
+  it("does not accept a previous translation nothing has vouched for", async () => {
+    // Same `changed` classification, no cache entry behind the disk value at
+    // all: a hand-written file, or a cache that was deleted. There is no
+    // evidence the Chinese answers this English, so it cannot end the retry.
+    const result = await translateNamespace({
+      sourceFlat: { "card.beverage": "Product" },
+      targetFlat: { "card.beverage": "产品" },
+      cacheEntries: {},
+      provider: createDegradingProvider("Product"),
+      targetLang: "zh",
+      force: false,
+    });
+
+    expect(result.acceptedSourceKeys).toEqual([]);
+    expect(result.staleSourceKeys).toEqual(["card.beverage"]);
   });
 
   it("does accept on a retry of the SAME English after an earlier eviction", async () => {
-    // Same `changed` classification as the test above — no cached hash — but
+    // Same `changed` classification as the tests above — no cached hash — but
     // the eviction, not an edit, is why. `retriedSourceKeys` is the only thing
     // that can tell the two apart, and it is what the per-language cache buys.
     const result = await translateNamespace({
@@ -564,6 +595,26 @@ describe("degraded values (CEL-1539 review)", () => {
 
     expect(result.acceptedSourceKeys).toEqual(["card.beverage"]);
     expect(result.staleSourceKeys).toEqual([]);
+    expect(result.sourceProvenance["card.beverage"]).toBe(hashValue("Product"));
+  });
+
+  it("does not accept English on disk that differs only in whitespace", async () => {
+    // The leak guard's identity test trims (`value.trim() === source.trim()`)
+    // and a provider does not trim individual values, so "Product " reaches the
+    // file. Under byte equality it counted as a real translation, was accepted,
+    // and cached the English source forever — the CEL-1539 shape.
+    const result = await translateNamespace({
+      sourceFlat: { "card.beverage": "Product" },
+      targetFlat: { "card.beverage": "Product " },
+      cacheEntries: {},
+      retriedSourceKeys: new Set(["card.beverage"]),
+      provider: createDegradingProvider("Product"),
+      targetLang: "zh",
+      force: false,
+    });
+
+    expect(result.acceptedSourceKeys).toEqual([]);
+    expect(result.staleSourceKeys).toEqual(["card.beverage"]);
   });
 
   it("carries an accept forward through a run that does not re-attempt the key", async () => {
@@ -721,7 +772,7 @@ describe("counts survive a collapsed plural group", () => {
     // left the cache; it did not receive a fresh translation.
     expect(result.translated).toBe(0);
     expect(result.failed).toBe(0);
-    expect(Object.keys(result.newCacheEntries)).toEqual([]);
+    expect(result.staleSourceKeys.sort()).toEqual(["item_one", "item_other"]);
   });
 
   it("still counts a clean group as translated", async () => {

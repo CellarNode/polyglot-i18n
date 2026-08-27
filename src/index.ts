@@ -23,7 +23,9 @@ export type {
   PluralRejectReason,
 } from "./plurals.js";
 export {
+  acceptedKeysForSource,
   computeDiff,
+  entryLangProvenance,
   hashValue,
   mergeNamespaceCache,
   pendingRetryKeys,
@@ -34,6 +36,7 @@ export type {
   CacheRecord,
   FullCache,
   LangCacheState,
+  LangProvenance,
   LanguageCacheView,
   NamespaceCache,
   NamespaceCacheUpdate,

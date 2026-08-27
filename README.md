@@ -123,8 +123,8 @@ Use `--force` to retranslate everything regardless of cache state.
 
 ### The cache has a language dimension
 
-An entry is normally just the hash of the English source, meaning "every language is done with
-this text":
+An entry is normally just the hash of the English source, meaning "every language's translation
+was made from this text":
 
 ```jsonc
 // .polyglot-cache.json
@@ -136,30 +136,56 @@ this text":
 }
 ```
 
-A language that could **not** finish a key records an exception against itself, and the entry
+A language that diverges from that — because it has retranslated newer English, because it could
+not vouch for its value, or because it has stopped asking — records its own entry, and the key
 grows a `langs` map:
 
 ```jsonc
 {
   "common.json": {
-    // zh could not vouch for its value and will retry; every other language is
-    // still cached and is NOT retranslated because of it.
-    "save": { "hash": "1d4f2a9c", "langs": { "zh": "stale" } },
+    // The default, "1d4f2a9c", is the hash any language NOT listed below is
+    // still on. It is frozen: it never moves, so a locale that has not run
+    // since the English changed is never told its file is current.
+    "save": {
+      "hash": "1d4f2a9c",
+      "langs": {
+        // zh has already retranslated the edited English...
+        "zh": { "hash": "5a71c0de" },
+        // ...ru could not vouch for its value and will retry it. The hash is
+        // what the RU FILE answers, not what English says today.
+        "ru": { "hash": "1d4f2a9c", "state": "stale" }
+      }
+    },
     // de asked twice and got the English source back both times, so it stopped
-    // asking. Any English edit, or --force, asks again.
-    "item_other": { "hash": "6ec1b820", "langs": { "de": "accepted" } },
+    // asking — at that hash. Any English edit, or --force, asks again.
+    "item_other": {
+      "hash": "6ec1b820",
+      "langs": { "de": { "hash": "6ec1b820", "state": "accepted" } }
+    },
     "cancel": "8b03e517"
   }
 }
 ```
 
+- **The hash on a language's record is provenance, not a timestamp.** It is the English text that
+  language's value on disk was made from. That is what an `accepted` or `stale` marker is checked
+  against, so an eviction that kept a translation of the PREVIOUS English can never, one run
+  later, be read as evidence that the file answers the current text.
+- **A language with no record is on the entry's default hash, and the default never moves.**
+  Before 0.4.0 the hash was shared and rewritten by whichever language ran last, so after an
+  English edit the first language retranslated and every later one measured its own stale file
+  against the new hash and skipped. `-o zh,ru` and `-o zh` then `-o ru` were equally affected.
 - **Cache files from 0.3.x and earlier load unchanged.** A bare hash keeps its old meaning —
-  cached for every language — so nothing needs migrating and no first run after upgrading
+  every language is on this text — so nothing needs migrating and no first run after upgrading
   retranslates anything it would not have retranslated before. A key upgrades to the record shape
-  only when a language actually needs an exception on it.
+  only when a language actually diverges on it.
 - **A language not named in `langs` is cached.** That cannot silently skip a language with no
   translation on disk: a key absent from a target file is classified **Missing** before the cache
   is consulted at all.
+- **A record with no `hash` means nothing vouches for the file.** A run that keeps a previous
+  translation it has no cache entry behind writes `{ "state": "stale" }` and no hash, rather than
+  claiming the current one. Such a key is retranslated every run until a translation the run can
+  vouch for lands — the same cost 0.3.x paid, and the honest answer when there is no evidence.
 - **One language's problem is not another language's bill.** Before 0.4.0 an eviction was
   expressed by deleting the key, which deleted it for everyone, so a single degraded `zh` value
   meant `sv`, `fr`, `de`, `it`, `es` and `ru` all retranslated it on the next run — with a
@@ -167,6 +193,9 @@ grows a `langs` map:
 - **Evictions survive the process.** Running `-o zh` and then `-o ru` as two separate commands now
   behaves exactly like `-o zh,ru`. Before 0.4.0 the second command put the first command's
   evictions back.
+- **`--force` never records an accept.** It always evicts a value it could not vouch for, exactly
+  as every version before 0.4.0 did. It is the command for re-opening decisions, not for making
+  them.
 
 `--cache-file` and `--no-cache` are unchanged. Commit `.polyglot-cache.json` — it is what stops CI
 from clobbering hand-edited translations.
@@ -217,10 +246,24 @@ Details worth knowing:
   holds the English form it would have been backfilled with is complete by key count and carries
   no translation; it is retranslated without `--force`. Only groups whose English has two or more
   distinct forms qualify — one form repeated is what a filename or a `{{count}} мл` legitimately
-  looks like. If the retranslation hands back the English source **again**, the group is accepted
-  for that language and stops being re-queued: a third attempt cannot produce a different answer,
-  and on a Latin-script target — where the leak guard does not run — this used to repeat forever.
-  `--force`, or an edit to the English, asks again.
+  looks like. The comparison ignores surrounding whitespace, matching the leak guard's own
+  identity test, because a provider does not trim individual values.
+
+  If the retranslation hands back the English source **again**, what happens next depends on
+  whether anything is in a position to judge the value:
+
+  - on a **non-Latin** target (`zh`, `ru`, `uk`, `ar`, …) the leak guard read every category and
+    stayed silent, which means the source has no ordinary English content to render — a
+    `{{count}} PDF`. A third attempt cannot produce a different answer, so the group is accepted
+    for that language at that source hash and stops being re-queued.
+  - on a **Latin-script** target (`de`, `fr`, `es`, `it`, `sv`, …) the guard does not run at all,
+    so nothing has looked at the value and a genuine English leak is indistinguishable from a
+    correct one. Accepting it would cache the leak permanently, so the group is re-queued on
+    every run instead. That is a real per-run cost, and it is the one the leak guard's script
+    scope obliges: a recoverable bill beats an unrecoverable English locale.
+
+  `--force`, or an edit to the English, asks again — and `--force` never records an accept of its
+  own.
 - **The cache stays keyed on English, per language.** `.polyglot-cache.json` tracks the English
   source keys; the extra target-only forms are carried over untouched between runs. It is scoped
   per namespace, and a key one language drops stays dropped **for that language**, across
@@ -255,7 +298,7 @@ What happens to a value that is still flagged afterwards depends on what it is:
 | --- | --- |
 | English spliced into a translated value, or no value at all | **Blocked.** The previous translation is kept, or the key is left out of the file entirely. Counted in `failed`, reported in `errors`, dropped from the cache. |
 | Byte-identical to the source, **and** built from ordinary UI vocabulary (`Save`, `Download labels`) | **Blocked**, same as above. The whole value is the source and every word in it is one a translator renders — English never reaches the file. |
-| Byte-identical to the source, uncorroborated (`Systembolaget`, `Vintage`, `qr-labels-{{count}}.zip`) | **Never blocked.** The previous translation wins if there is one; otherwise the value is written. Reported as a warning and dropped from the cache, never counted in `failed`. Once a real translation on disk has beaten the same English twice, the key is accepted for that language and stops being retried. |
+| Byte-identical to the source, uncorroborated (`Systembolaget`, `Vintage`, `qr-labels-{{count}}.zip`) | **Never blocked.** The previous translation wins if there is one; otherwise the value is written. Reported as a warning and dropped from the cache, never counted in `failed`. Once a translation on disk that is known to answer the current English has beaten the same text twice, the key is accepted for that language and stops being retried. |
 | A uniform plural group | **Never blocked.** Same as above: warned, written or beaten by the previous translation, dropped from the cache, then accepted on the retry that changes nothing. |
 | A category copied from a translated `_other` | **Written**, reported as a warning. |
 
@@ -276,10 +319,15 @@ distinguish from a real under-differentiation, and it applies to Latin-script `p
 need four CLDR categories just as `ru` does.
 
 It is a one-off cost rather than a per-run one. The eviction is recorded against the language that
-made it, so the next run can see that the model has already been asked about this exact English
-and that the file already holds a real translation — and accepts it instead of paying again. A
-target file holding the English source is never accepted; that value has to be retried, which is
-the whole point of the eviction.
+made it, stamped with the English its file actually answers, so the next run can see that the
+model has already been asked about this exact text and that the file already holds a real
+translation — and accepts it instead of paying again. Three things can never be accepted, and each
+goes back to being retried instead:
+
+- a target file holding the English source — that value is the whole reason for the eviction;
+- a translation made from English that has since been edited, however long ago the eviction was
+  written, because the value on disk renders text that is gone;
+- anything at all under `--force`.
 
 ### What is never reported as a leak
 

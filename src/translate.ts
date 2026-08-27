@@ -9,6 +9,7 @@ import {
 import { join, dirname, basename } from "node:path";
 import { flattenJSON, unflattenJSON } from "./json-utils.js";
 import {
+  acceptedKeysForSource,
   computeDiff,
   buildCacheEntries,
   mergeNamespaceCache,
@@ -17,6 +18,7 @@ import {
   type DiffResult,
   type FullCache,
 } from "./cache.js";
+import { usesNonLatinScript } from "./leak-guard.js";
 import { chunkEntries } from "./chunk.js";
 import { validatePlaceholders } from "./placeholder.js";
 import {
@@ -84,7 +86,20 @@ export interface NamespaceResult {
   warnings: string[];
   errors: string[];
   output: Record<string, string>;
-  newCacheEntries: Record<string, string>;
+  /**
+   * English hash the value this run leaves on disk answers, per SOURCE key.
+   *
+   * The current hash wherever the run wrote fresh provider output; the hash the
+   * value already carried wherever it kept what was on disk. A key is ABSENT
+   * when the run kept a value nothing knows the provenance of — the cache then
+   * records it without a hash, so it is never skipped and never accepted.
+   *
+   * This, not the run's own timing, is what a later run's accept is checked
+   * against: an eviction stamped with the hash that happened to be current
+   * would vouch for a translation of text that had already been replaced
+   * (CEL-1543).
+   */
+  sourceProvenance: Record<string, string>;
   /**
    * SOURCE keys this language must retry on the next run — it failed them, or
    * degraded them with nothing better already on disk. Recorded per language so
@@ -184,12 +199,17 @@ export async function translateNamespace(opts: {
    */
   cachedAcceptedKeys?: ReadonlySet<string>;
   /**
-   * Source keys this language evicted on an earlier run AT THE SAME English
-   * text. `computeDiff` reports those as `changed` — it sees no cached hash and
-   * cannot tell why — but the distinction matters: a previous translation is
-   * still an answer to the current source, so a value the provider degrades on
-   * this attempt may be accepted. A key whose English genuinely changed is not
-   * eligible, because the translation on disk renders text that is gone.
+   * Source keys this language evicted on an earlier run, whose value on disk
+   * WAS MADE FROM the English text now in `sourceFlat`. `computeDiff` reports
+   * those as `changed` — it sees no cached hash and cannot tell why — but the
+   * distinction matters: a previous translation is still an answer to the
+   * current source, so a value the provider degrades on this attempt may be
+   * accepted instead of retried forever.
+   *
+   * The membership test is the PROVENANCE of the value on disk, not the run
+   * that evicted it (`pendingRetryKeys`). A key whose English changed after the
+   * translation was made is therefore never eligible, however many runs have
+   * passed since — the translation on disk renders text that is gone.
    */
   retriedSourceKeys?: ReadonlySet<string>;
 }): Promise<NamespaceResult> {
@@ -283,14 +303,40 @@ export async function translateNamespace(opts: {
     }
   }
 
+  const currentHashes = buildCacheEntries(sourceFlat);
+
   /**
-   * True when the English text behind `key` is the same text the translation on
-   * disk was made from. `diff.changed` alone cannot answer that: a key an
-   * earlier run evicted lands there too, with its English untouched.
+   * The English text the value currently on disk for `key` was made from, as
+   * far as anything knows.
+   *
+   * A cached key answers the hash the cache holds for it. A key this language
+   * evicted at the same English answers the current one — `retriedSourceKeys`
+   * is the only carrier of that fact, because `computeDiff` cannot see it.
+   * Everything else is `undefined`: a value with no cache entry behind it is a
+   * value nothing has ever vouched for, and guessing "current" there is exactly
+   * how a stale translation gets laundered into a permanent one.
    */
-  const changedKeys = new Set(diff.changed);
-  const sourceStillMatchesDisk = (key: string): boolean =>
-    !changedKeys.has(key) || retriedKeys.has(key);
+  const provenanceOf = (key: string): string | undefined =>
+    retriedKeys.has(key) ? currentHashes[key] : cacheEntries[key];
+
+  /**
+   * True when the translation on disk answers the English being translated now
+   * — the precondition for preferring it over a degraded attempt and then
+   * ceasing to ask.
+   *
+   * `--force` is excluded outright. It is the command a user reaches for to
+   * recover from a bad locale file, and 0.3.x always evicted a degraded key
+   * under it; letting force mint accepts would freeze exactly the values the
+   * flag exists to re-open.
+   */
+  const sourceStillMatchesDisk = (key: string): boolean => {
+    if (force) return false;
+    const current = currentHashes[key];
+    return current !== undefined && provenanceOf(key) === current;
+  };
+
+  /** Source keys whose value on disk this run kept rather than rewrote. */
+  const keptPreviousSourceKeys = new Set<string>();
 
   // Carry over unchanged translations
   for (const key of diff.unchanged) {
@@ -346,7 +392,9 @@ export async function translateNamespace(opts: {
       warnings,
       errors: [],
       output,
-      newCacheEntries: buildCacheEntries(sourceFlat),
+      // Nothing was rewritten, and every source key is `unchanged` — which is
+      // to say the cache already holds the current hash for each of them.
+      sourceProvenance: { ...currentHashes },
       staleSourceKeys: [],
       acceptedSourceKeys: carriedAccepts,
       outputKeyOrder,
@@ -416,14 +464,16 @@ export async function translateNamespace(opts: {
         for (const fallback of expandPluralFallback(entry)) {
           failedKeys++;
           const previous = targetFlat[fallback.key];
-          if (previous !== undefined && previous !== "") {
-            translatedEntries.push({ key: fallback.key, value: previous });
-          }
-          for (const key of sourceKeysFor(
+          const sourceKeys = sourceKeysFor(
             fallback.key,
             sourceFlat,
             pluralGroups
-          )) {
+          );
+          if (previous !== undefined && previous !== "") {
+            translatedEntries.push({ key: fallback.key, value: previous });
+            for (const key of sourceKeys) keptPreviousSourceKeys.add(key);
+          }
+          for (const key of sourceKeys) {
             failedSourceKeys.add(key);
           }
         }
@@ -462,6 +512,9 @@ export async function translateNamespace(opts: {
       if (previous !== undefined && previous !== "") output[entry.key] = previous;
       for (const key of sourceKeysFor(entry.key, sourceFlat, pluralGroups)) {
         failedSourceKeys.add(key);
+        if (previous !== undefined && previous !== "") {
+          keptPreviousSourceKeys.add(key);
+        }
       }
       continue;
     }
@@ -489,10 +542,20 @@ export async function translateNamespace(opts: {
       // dimension makes possible; `--force` or an edit to the English asks
       // again. Anything else keeps its eviction: English on disk, or a
       // translation of English text that is gone, must be retried.
+      //
+      // The English comparison TRIMS, to the same rule the leak guard blocks
+      // on (`value.trim() === sourceText.trim()`). A provider does not trim
+      // individual values, so "Product " on disk is the English source with a
+      // stray space — treating it as a real translation would accept it and
+      // cache the CEL-1539 shape the guard exists to catch.
       const english = resolveSourceValue(entry.key, sourceFlat, pluralGroups);
-      const previousBeatsThis = keepPrevious && previous !== english;
+      const previousBeatsThis =
+        keepPrevious &&
+        english !== undefined &&
+        previous.trim() !== english.trim();
       for (const key of sourceKeysFor(entry.key, sourceFlat, pluralGroups)) {
         degradedSourceKeys.add(key);
+        if (keepPrevious) keptPreviousSourceKeys.add(key);
         if (previousBeatsThis && sourceStillMatchesDisk(key)) {
           acceptedSourceKeys.add(key);
         } else {
@@ -515,14 +578,24 @@ export async function translateNamespace(opts: {
   // be translated again. When the retry hands back the English source AGAIN,
   // asking a third time cannot change the answer — every future run would
   // re-queue it, retranslate it and get the same bytes, at full API cost and
-  // with an LLM-nondeterministic value each time. The group is accepted for
-  // THIS language at THIS source hash; editing the English or passing --force
-  // asks again.
+  // with an LLM-nondeterministic value each time.
   //
-  // Only reachable where the leak guard did not object: a Latin-script target,
-  // which it deliberately does not judge, or a group it waved through. Anything
-  // it flagged sits in `failedSourceKeys` or `degradedSourceKeys` and is
-  // excluded here.
+  // But "cannot change the answer" is only a reason to STOP asking where
+  // something has judged the answer acceptable. On a non-Latin target the leak
+  // guard reads every value and blocks or degrades a genuine English leak, so a
+  // group that reaches here has been examined and waved through: it is English
+  // by necessity (`{{count}} PDF`), and the accept is the documented mitigation.
+  // On a LATIN-script target the guard does not run at all (see the SCOPE note
+  // in leak-guard.ts) — nothing has looked at the value, and an English leak in
+  // de/fr/es/it is indistinguishable from a correct one. Accepting there would
+  // cache the CEL-1539 shape permanently, so the group is re-queued instead, at
+  // the per-run cost CEL-1533 already accepted for it.
+  //
+  // `--force` never mints an accept either: it is the flag for re-opening
+  // decisions, not for making them.
+  //
+  // Anything the guard flagged sits in `failedSourceKeys` or
+  // `degradedSourceKeys` and is excluded here.
   for (const group of expansionGroups.values()) {
     if (!group.sourceKeys.some((key) => preRunFallback.has(key))) continue;
     if (!group.sourceKeys.some((key) => retranslating.has(key))) continue;
@@ -534,11 +607,21 @@ export async function translateNamespace(opts: {
       continue;
     }
     if (!isEnglishFallbackGroup(output, group)) continue;
+
+    const guardJudgedIt = usesNonLatinScript(targetLang);
+    const mayAccept = !force && guardJudgedIt;
     warnings.push(
       `Plural group "${group.base}": the retranslation returned the English ` +
-        `source again — accepted for ${targetLang} and cached; run with ` +
-        `--force to ask again`
+        `source again — ` +
+        (mayAccept
+          ? `accepted for ${targetLang} and cached; run with --force to ask again`
+          : guardJudgedIt
+            ? `--force never records an accept, so it will be asked again`
+            : `${targetLang} is written in the Latin script, where the leak ` +
+              `guard cannot tell an English leak from a value that is English ` +
+              `by necessity, so it will be asked again`)
     );
+    if (!mayAccept) continue;
     for (const key of group.sourceKeys) acceptedSourceKeys.add(key);
   }
 
@@ -551,8 +634,18 @@ export async function translateNamespace(opts: {
     if (!staleSourceKeys.has(key)) acceptedSourceKeys.add(key);
   }
 
-  const newCacheEntries = buildCacheEntries(sourceFlat);
-  for (const key of staleSourceKeys) delete newCacheEntries[key];
+  // What each key's value on disk now answers. A key the run rewrote answers
+  // the current English; a key whose previous value was kept still answers
+  // whatever that value answered, and answers NOTHING knowable when there was
+  // no cache entry behind it. Recording the current hash there would let the
+  // next run read the eviction as "asked about this exact text" and accept a
+  // translation of text that is gone (CEL-1543).
+  const sourceProvenance: Record<string, string> = { ...currentHashes };
+  for (const key of keptPreviousSourceKeys) {
+    const known = provenanceOf(key);
+    if (known === undefined) delete sourceProvenance[key];
+    else sourceProvenance[key] = known;
+  }
 
   // UNITS. `translated`, `changed` and `skipped` count SOURCE keys; `failed`
   // counts EMITTED keys, because that is the number of locale entries a reader
@@ -587,7 +680,7 @@ export async function translateNamespace(opts: {
     warnings,
     errors,
     output,
-    newCacheEntries,
+    sourceProvenance,
     staleSourceKeys: [...staleSourceKeys],
     acceptedSourceKeys: [...acceptedSourceKeys],
     outputKeyOrder,
@@ -735,6 +828,7 @@ export async function translate(
       const namespaceCache = fullCache[cacheKey] ?? {};
       const cacheView = viewForLanguage(namespaceCache, lang);
       const retriedSourceKeys = pendingRetryKeys(cacheView, sourceFlat);
+      const cachedAcceptedKeys = acceptedKeysForSource(cacheView, sourceFlat);
 
       if (dryRun) {
         const diff = computeDiff(sourceFlat, targetFlat, cacheView.hashes);
@@ -746,7 +840,7 @@ export async function translate(
         const incomplete = incompletePluralSourceKeys(
           targetFlat,
           pluralGroups,
-          cacheView.accepted
+          cachedAcceptedKeys
         ).filter((key) => !queued.has(key));
         const toTranslate = force
           ? Object.keys(sourceFlat).length
@@ -766,7 +860,7 @@ export async function translate(
         sourceFlat,
         targetFlat,
         cacheEntries: cacheView.hashes,
-        cachedAcceptedKeys: cacheView.accepted,
+        cachedAcceptedKeys,
         retriedSourceKeys,
         provider,
         targetLang: lang,
@@ -793,6 +887,7 @@ export async function translate(
       // invocations now behaves exactly like `-o zh,ru` (CEL-1543).
       fullCache[cacheKey] = mergeNamespaceCache(namespaceCache, lang, {
         hashes: buildCacheEntries(sourceFlat),
+        provenance: result.sourceProvenance,
         stale: result.staleSourceKeys,
         accepted: result.acceptedSourceKeys,
       });

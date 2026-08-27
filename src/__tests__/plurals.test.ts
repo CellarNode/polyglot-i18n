@@ -189,6 +189,24 @@ describe("incompletePluralSourceKeys", () => {
    * never changes, so the cache says "done" on every future run.
    */
   describe("a group filled with the English source", () => {
+    it("is flagged even when the English carries stray whitespace", () => {
+      // CEL-1543 review, P2. The leak guard's identity test trims
+      // (`value.trim() === sourceText.trim()`) and providers do not trim
+      // individual values, so a padded English form reaches the file. Under
+      // byte equality it was neither flagged here nor blocked there — silent
+      // and cached, by one space.
+      const target = {
+        item_one: " {{count}} item",
+        item_few: "{{count}} items ",
+        item_many: "{{count}} items",
+        item_other: "{{count}} items",
+      };
+      expect(incompletePluralSourceKeys(target, groups)).toEqual([
+        "item_one",
+        "item_other",
+      ]);
+    });
+
     it("is flagged for regeneration even though every category is present", () => {
       const target = {
         item_one: "{{count}} item",
