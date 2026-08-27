@@ -193,6 +193,51 @@ describe("plural expansion (CEL-1267)", () => {
       ]).entries
     ).toEqual([{ key: "save", value: "Сохранить" }]);
   });
+
+  /**
+   * CEL-1542, P3.
+   *
+   * `detectLeaks` dedups per key: a category already reported by `checkValue`
+   * or by `filledFromOther` is not reported a second time by the uniform-plural
+   * check. That dedup is cache-safe only because `_other` can never appear in
+   * `filledFromOther` — if it could, the `accept` disposition it carries would
+   * suppress the `prefer-previous` uniform suspect on that one key, and the
+   * group would be half-cached. The invariant lives here, in the only code that
+   * writes the set, so pin it here.
+   */
+  describe("filledFromOther never contains the _other key itself", () => {
+    it("does not backfill _other from itself when the model omitted it", () => {
+      const { filledFromOther, unresolved } = parseGeminiResponse(
+        JSON.stringify({ item_one: "{{count}} товар" }),
+        [RU_PLURAL_ENTRY]
+      );
+      expect(filledFromOther.has("item_other")).toBe(false);
+      // It is unresolved instead, so the guard fails it rather than papering
+      // over it.
+      expect(unresolved.has("item_other")).toBe(true);
+    });
+
+    it("does not record _other when the model DID return it", () => {
+      const { filledFromOther } = parseGeminiResponse(
+        JSON.stringify({
+          item_one: "{{count}} товар",
+          item_other: "{{count}} товара",
+        }),
+        [RU_PLURAL_ENTRY]
+      );
+      // The other two categories are recorded — so the set is not simply empty.
+      expect([...filledFromOther].sort()).toEqual(["item_few", "item_many"]);
+      expect(filledFromOther.has("item_other")).toBe(false);
+    });
+
+    it("records nothing at all when _other is unusable", () => {
+      const { filledFromOther } = parseGeminiResponse(
+        JSON.stringify({ item_one: "{{count}} товар", item_other: "   " }),
+        [RU_PLURAL_ENTRY]
+      );
+      expect([...filledFromOther]).toEqual([]);
+    });
+  });
 });
 
 describe("prompt hardening against English leaks (CEL-1539)", () => {

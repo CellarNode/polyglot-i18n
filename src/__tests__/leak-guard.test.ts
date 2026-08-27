@@ -161,13 +161,14 @@ describe("detectLeaks — English leak (CEL-1539)", () => {
     );
 
     expect(suspects).toHaveLength(1);
-    // The whole value IS the source, so it is retried but never blocked: the
-    // previous zh translation is what saves it.
+    // The whole value IS the source AND it is ordinary UI vocabulary, so it is
+    // blocked: the previous zh translation is written, or the key is dropped.
+    // English never reaches the file (CEL-1542).
     expect(suspects[0]).toMatchObject({
       key: "card.beverage_one",
       reason: "identical-to-source",
       severity: "fail",
-      disposition: "prefer-previous",
+      disposition: "block",
     });
     expect(suspects[0].detail).toContain('"Product"');
   });
@@ -444,14 +445,27 @@ describe("severity and disposition are independent", () => {
   const dispositionFor = (suspects: LeakSuspect[], key: string) =>
     suspects.find((s) => s.key === key)?.disposition;
 
-  it("never blocks a byte-identical value, whatever the reason", () => {
+  it("never blocks an UNCORROBORATED byte-identical value", () => {
+    // "Vintage" is not in `TRANSLATABLE_WORDS`, so the guard has no evidence
+    // this is English rather than a domain term. It degrades, never blocks.
+    const suspects = detectLeaks(
+      entries({ vintage: "Vintage" }),
+      entries({ vintage: "Vintage" }),
+      "ru"
+    );
+    expect(dispositionFor(suspects, "vintage")).toBe("prefer-previous");
+    // Uncorroborated, so it does not even buy the corrective retry.
+    expect(suspects[0].severity).toBe("warn");
+  });
+
+  it("blocks a byte-identical value the vocabulary corroborates", () => {
     const suspects = detectLeaks(
       entries({ save: "Save" }),
       entries({ save: "Save" }),
       "ru"
     );
-    expect(dispositionFor(suspects, "save")).toBe("prefer-previous");
-    // Still `fail`, so it earns the one corrective retry.
+    expect(dispositionFor(suspects, "save")).toBe("block");
+    // Still `fail`, so it earns the one corrective retry BEFORE the block bites.
     expect(suspects[0].severity).toBe("fail");
   });
 
@@ -542,7 +556,7 @@ describe("identical-to-source is independent of the vocabulary list", () => {
     }
   );
 
-  it("still earns the corrective retry when the vocabulary corroborates it", () => {
+  it("blocks it outright when the vocabulary corroborates it", () => {
     const suspects = detectLeaks(
       entries({ save: "Save" }),
       entries({ save: "Save" }),
@@ -550,8 +564,10 @@ describe("identical-to-source is independent of the vocabulary list", () => {
     );
     expect(suspects[0]).toMatchObject({
       reason: "identical-to-source",
+      // `fail` buys the corrective retry; `block` is what happens if the retry
+      // comes back with the same English.
       severity: "fail",
-      disposition: "prefer-previous",
+      disposition: "block",
     });
   });
 
@@ -559,10 +575,12 @@ describe("identical-to-source is independent of the vocabulary list", () => {
     const silent = (source: string, lang = "zh") =>
       detectLeaks(entries({ k: source }), entries({ k: source }), lang);
 
-    // A filename template and a slug: one unbroken identifier once the
+    // A filename template: one unbroken token carrying an extension once the
     // placeholder is removed.
     expect(silent("qr-labels-{{count}}.zip")).toEqual([]);
-    expect(silent("cellarnode-admin")).toEqual([]);
+    // A path and a snake_case identifier — `/` and `_` are never prose.
+    expect(silent("locales/en/common.json")).toEqual([]);
+    expect(silent("bulk_qr_codes")).toEqual([]);
     // A brand plus a Titlecase proper noun away from a sentence start.
     expect(silent("TanStack Query")).toEqual([]);
     expect(silent("e.g., Pinot Noir")).toEqual([]);
@@ -570,8 +588,69 @@ describe("identical-to-source is independent of the vocabulary list", () => {
     expect(silent("{{count}} PDF")).toEqual([]);
   });
 
-  it("never blocks a byte-identical value, listed word or not", () => {
-    for (const source of [...DOMAIN_ENGLISH, "Save", "Product options"]) {
+  /**
+   * CEL-1542, P2.
+   *
+   * `isIdentifierShaped` used to accept ANY single token with an internal
+   * hyphen or an ASCII period. That exempted ordinary English compounds and a
+   * word with a full stop, so a byte-identical value for them was written to
+   * the locale file AND cached — silent-and-cached, the one outcome this module
+   * must never produce (inside the non-Latin scope).
+   */
+  describe("hyphenated English compounds are not identifiers", () => {
+    const HYPHENATED = [
+      "Sign-up",
+      "Read-only",
+      "Real-time",
+      "Opt-in",
+      "Follow-up",
+      "Vintage.",
+    ];
+
+    it.each(HYPHENATED)("reports byte-identical %j instead of caching it", (source) => {
+      const suspects = detectLeaks(
+        entries({ k: source }),
+        entries({ k: source }),
+        "zh"
+      );
+      expect(suspects).toEqual([
+        expect.objectContaining({ key: "k", reason: "identical-to-source" }),
+      ]);
+      // Loud, but never a failure: none of these is corroborated vocabulary.
+      expect(suspects[0].disposition).toBe("prefer-previous");
+    });
+
+    it("keeps the filename template silent — its `.zip`, not its hyphens", () => {
+      // The anti-vacuity pin for the rule above: dropping the hyphen branch
+      // must not take `qr-labels-{{count}}.zip` with it.
+      expect(
+        detectLeaks(
+          entries({ k: "qr-labels-{{count}}.zip" }),
+          entries({ k: "qr-labels-{{count}}.zip" }),
+          "zh"
+        )
+      ).toEqual([]);
+    });
+
+    it("degrades a bare hyphenated slug rather than passing it silently", () => {
+      // The accepted cost of the rule: a slug with no `.`, `_` or `/` is now
+      // warned about and retranslated next run. A warning, never a block.
+      const suspects = detectLeaks(
+        entries({ k: "cellarnode-admin" }),
+        entries({ k: "cellarnode-admin" }),
+        "zh"
+      );
+      expect(suspects).toHaveLength(1);
+      expect(suspects[0]).toMatchObject({
+        reason: "identical-to-source",
+        severity: "warn",
+        disposition: "prefer-previous",
+      });
+    });
+  });
+
+  it("never blocks an uncorroborated byte-identical value, listed word or not", () => {
+    for (const source of DOMAIN_ENGLISH) {
       const suspects = detectLeaks(
         entries({ k: source }),
         entries({ k: source }),
@@ -581,6 +660,22 @@ describe("identical-to-source is independent of the vocabulary list", () => {
         suspects.filter((s) => s.disposition === "block"),
         source
       ).toEqual([]);
+    }
+  });
+
+  it("does block one the vocabulary can see — the counterweight", () => {
+    // Without this the table above would pass for a detector that never blocks
+    // anything at all.
+    for (const source of ["Save", "Product options"]) {
+      const suspects = detectLeaks(
+        entries({ k: source }),
+        entries({ k: source }),
+        "ru"
+      );
+      expect(
+        suspects.map((s) => s.disposition),
+        source
+      ).toEqual(["block"]);
     }
   });
 });

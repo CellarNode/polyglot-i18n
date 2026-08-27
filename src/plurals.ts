@@ -20,6 +20,14 @@ const PLURAL_SUFFIX_RE = /_(zero|one|two|few|many|other)$/;
 /** i18next marks ordinal plurals with an `_ordinal` segment before the category. */
 const ORDINAL_SUFFIX = "_ordinal";
 
+/**
+ * A source form that has to inflect with a count says so with a placeholder.
+ * The only structural evidence available for telling a real single-form plural
+ * (`listingCount_other`: "{{count}} listings") from an enum member that merely
+ * ends in `_other` (`document.kind_other`: "Document").
+ */
+export const COUNT_PLACEHOLDER_RE = /\{\{[^}]*\}\}|\{[0-9]+\}|%[sd]/;
+
 export interface PluralKeyParts {
   base: string;
   category: PluralCategory;
@@ -96,9 +104,16 @@ export interface PluralGroup {
  * Groups the plural keys of a flat source map by base and resolves the plural
  * categories the target language requires for each.
  *
- * A base only counts as a plural group when it has an `_other` variant —
- * i18next requires `_other` for every plural key, so this guard keeps
- * incidental keys like `step_one` ("Step one") out of the expansion path.
+ * Two guards keep incidental keys out of the expansion path, because expanding
+ * one invents `_one`/`_few`/`_many` siblings that i18next then serves whenever
+ * the count is not "other":
+ *
+ * - no `_other` variant → not a plural. i18next requires `_other` for every
+ *   plural key, so `step_one` ("Step one") is a key that merely ends in `_one`.
+ * - a LONE `_other` variant whose value carries no count placeholder → not a
+ *   plural either. `document.kind_other` is the "other" document kind, not a
+ *   plural of `document.kind`; `listingCount_other` ("{{count}} listings") is a
+ *   genuine single-form plural and keeps its expansion.
  */
 export function collectPluralGroups(
   sourceFlat: Record<string, string>,
@@ -125,13 +140,23 @@ export function collectPluralGroups(
   }
 
   for (const [base, group] of groups) {
-    if (!("other" in group.sourceForms)) {
+    const categories = Object.keys(group.sourceForms);
+    if (!categories.includes("other")) {
+      groups.delete(base);
+      continue;
+    }
+    // The `_other`-sibling guard was one-sided: a base with NOTHING but
+    // `_other` passed it and was expanded into a full plural group (CEL-1533).
+    if (
+      categories.length === 1 &&
+      !COUNT_PLACEHOLDER_RE.test(group.sourceForms.other)
+    ) {
       groups.delete(base);
       continue;
     }
     const type = pluralTypeForBase(base);
     group.targetCategories = sortCategories([
-      ...Object.keys(group.sourceForms),
+      ...categories,
       ...getPluralCategories(targetLang, type),
     ]);
   }
@@ -151,10 +176,16 @@ export function indexGroupsBySourceKey(
 }
 
 /**
- * Source keys of every plural group whose target file is missing a category the
- * language needs. Such a group must be regenerated even when its English source
- * is unchanged — otherwise a locale written before plural expansion existed
- * never gains its `_few`/`_many` forms without `--force`.
+ * Source keys of every plural group whose target file needs regenerating even
+ * though its English source is unchanged. Two shapes qualify:
+ *
+ * - a category the language needs is missing or empty — otherwise a locale
+ *   written before plural expansion existed never gains its `_few`/`_many`
+ *   forms without `--force`;
+ * - every category holds the English source form it would have been backfilled
+ *   with. Such a group is complete by key count and carries no translation at
+ *   all; nothing else in the pipeline can rescue it, because the source hash
+ *   never changes and the cache says "done" (CEL-1533).
  */
 export function incompletePluralSourceKeys(
   targetFlat: Record<string, string>,
@@ -166,9 +197,36 @@ export function incompletePluralSourceKeys(
       const key = `${group.base}_${category}`;
       return key in targetFlat && targetFlat[key] !== "";
     });
-    if (!complete) keys.push(...group.sourceKeys);
+    if (!complete || isEnglishFallback(targetFlat, group)) {
+      keys.push(...group.sourceKeys);
+    }
   }
   return keys;
+}
+
+/**
+ * True when the target reproduces the group's English source forms verbatim in
+ * every category — the exact shape `expandPluralFallback` writes, and the shape
+ * 0.3.0 shipped to production across seven locales.
+ *
+ * Requires the English source to have TWO OR MORE DISTINCT forms. One form
+ * repeated across every category is what a filename, a slug or a Russian unit
+ * abbreviation legitimately looks like, and flagging those would retranslate
+ * them on every run forever with no answer that could satisfy the check. Two
+ * distinct English forms reproduced exactly, category by category, is not
+ * something a real translation arrives at.
+ */
+function isEnglishFallback(
+  targetFlat: Record<string, string>,
+  group: PluralGroup
+): boolean {
+  if (new Set(Object.values(group.sourceForms)).size < 2) return false;
+  return group.targetCategories.every((category) => {
+    const english = sourceFormFor(group, category);
+    return (
+      english !== undefined && targetFlat[`${group.base}_${category}`] === english
+    );
+  });
 }
 
 /** The key a plural group is represented by in a provider request. */

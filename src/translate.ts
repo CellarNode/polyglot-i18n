@@ -40,9 +40,18 @@ export interface TranslateOptions {
 }
 
 export interface TranslateResult {
+  /** SOURCE keys that received a fresh translation. */
   translated: number;
+  /** SOURCE keys skipped because the cache says the source is unchanged. */
   skipped: number;
+  /** SOURCE keys retranslated because the English source changed. */
   changed: number;
+  /**
+   * EMITTED keys that could not be written — a different unit from the three
+   * above, because one source key can emit four locale entries in a language
+   * with four plural categories. `errors` is a third unit again: one line per
+   * emitted key from the guard, one line per chunk from a provider outage.
+   */
   failed: number;
   warnings: string[];
   errors: string[];
@@ -51,9 +60,13 @@ export interface TranslateResult {
 }
 
 export interface NamespaceResult {
+  /** SOURCE keys that received a fresh translation. */
   translated: number;
+  /** SOURCE keys skipped because the cache says the source is unchanged. */
   skipped: number;
+  /** SOURCE keys retranslated because the English source changed. */
   changed: number;
+  /** EMITTED keys that could not be written — see `TranslateResult.failed`. */
   failed: number;
   warnings: string[];
   errors: string[];
@@ -142,12 +155,15 @@ export async function translateNamespace(opts: {
     context,
   } = opts;
 
-  // Only providers that opt in receive plural groups; everything else keeps
-  // the flat English key set exactly as before (DeepL path is untouched).
-  const pluralGroups = provider.supportsPluralExpansion
-    ? collectPluralGroups(sourceFlat, targetLang)
+  // Plural groups are collected for EVERY provider. Only a provider that opts
+  // in has them expanded into the request; the rest of the run still needs the
+  // full map, because the target file can hold categories English does not have
+  // and nothing else in the pipeline knows they belong together.
+  const pluralGroups = collectPluralGroups(sourceFlat, targetLang);
+  const expansionGroups = provider.supportsPluralExpansion
+    ? pluralGroups
     : new Map<string, PluralGroup>();
-  const groupBySourceKey = indexGroupsBySourceKey(pluralGroups);
+  const groupBySourceKey = indexGroupsBySourceKey(expansionGroups);
 
   let keysToTranslate: string[];
   let diff: DiffResult;
@@ -162,10 +178,13 @@ export async function translateNamespace(opts: {
     // A plural group whose target file is missing a category the language needs
     // must be regenerated even when every English source key is unchanged —
     // otherwise locales written before plural expansion never gain _few/_many.
+    // Gated on `expansionGroups`: a provider that cannot expand plurals could
+    // never fill those categories, so queueing them would retranslate the whole
+    // group on every run and still write nothing.
     const queued = new Set(keysToTranslate);
     const incomplete = incompletePluralSourceKeys(
       targetFlat,
-      pluralGroups
+      expansionGroups
     ).filter((key) => {
       if (queued.has(key)) return false;
       queued.add(key);
@@ -202,6 +221,27 @@ export async function translateNamespace(opts: {
     for (const category of group.targetCategories) {
       const key = `${group.base}_${category}`;
       if (key in targetFlat && !(key in output)) output[key] = targetFlat[key];
+    }
+  }
+
+  /**
+   * Plural categories the TARGET language has but English does not (`_few`,
+   * `_many`) carry no source key, so nothing regenerates them unless the
+   * provider expands plurals — and the loop above skips the whole group as soon
+   * as one of its source keys is being retranslated. Running DeepL over a
+   * locale Gemini had expanded therefore deleted every `_few`/`_many` in the
+   * file (CEL-1533): the source keys came back translated, the target-only ones
+   * were never written, and the writer only emits what `output` holds.
+   *
+   * Runs here, before the early return, so the merge loop below can still
+   * overwrite any of it with a value the provider actually produced.
+   */
+  for (const group of pluralGroups.values()) {
+    for (const category of group.targetCategories) {
+      const key = `${group.base}_${category}`;
+      if (key in output || key in sourceFlat) continue;
+      const previous = targetFlat[key];
+      if (previous !== undefined && previous !== "") output[key] = previous;
     }
   }
 
@@ -359,20 +399,35 @@ export async function translateNamespace(opts: {
   for (const key of failedSourceKeys) delete newCacheEntries[key];
   for (const key of degradedSourceKeys) delete newCacheEntries[key];
 
-  // `failedKeys` counts EMITTED keys (a ru plural group is four of them) —
-  // that is what `errors` reports. `translated` is a count of SOURCE keys, so
-  // it has to subtract failed source keys, not emitted ones, or a single failed
-  // group would subtract four from a two-key total.
-  const failedSourceCount = (keys: string[]) =>
-    keys.reduce((n, key) => n + (failedSourceKeys.has(key) ? 1 : 0), 0);
+  // UNITS. `translated`, `changed` and `skipped` count SOURCE keys; `failed`
+  // counts EMITTED keys, because that is the number of locale entries a reader
+  // has to go and look at — a ru plural group is four of them. The guard path
+  // pushes one `errors` line per emitted key; the chunk-failure path pushes one
+  // per chunk, so `failed` and `errors.length` are not interchangeable.
+  //
+  // A source key that failed OR degraded did not receive a fresh translation:
+  // both leave the cache, and both keep the previous value (or nothing) instead
+  // of the provider's answer. Counting either as translated overstates the run,
+  // and `changed` used to subtract neither — so a plural group that collapsed
+  // into one chunk entry and then failed was reported as "updated" AND "failed"
+  // in the same summary (CEL-1533).
+  const notTranslated = (keys: string[]) =>
+    keys.reduce(
+      (n, key) =>
+        n + (failedSourceKeys.has(key) || degradedSourceKeys.has(key) ? 1 : 0),
+      0
+    );
   const translatedCount = force
-    ? keysToTranslate.length - failedSourceCount(keysToTranslate)
-    : diff.missing.length - failedSourceCount(diff.missing);
+    ? keysToTranslate.length - notTranslated(keysToTranslate)
+    : diff.missing.length - notTranslated(diff.missing);
+  const changedCount = force
+    ? 0
+    : diff.changed.length - notTranslated(diff.changed);
 
   return {
     translated: Math.max(0, translatedCount),
     skipped: diff.unchanged.length,
-    changed: force ? 0 : diff.changed.length,
+    changed: Math.max(0, changedCount),
     failed: failedKeys,
     warnings,
     errors,
@@ -450,6 +505,19 @@ export async function translate(
   if (cacheFilePath && existsSync(cacheFilePath)) {
     fullCache = JSON.parse(readFileSync(cacheFilePath, "utf-8"));
   }
+
+  /**
+   * Keys evicted from the cache by ANY language, per namespace.
+   *
+   * The cache is namespace-scoped and language-INDEPENDENT: one map of source
+   * hashes per file, rewritten once per language in the loop below. An eviction
+   * is a property of the namespace, not of the language that found it — without
+   * this union, a later language re-added a key an earlier one had degraded,
+   * and the next run saw an unchanged hash and skipped the English value it had
+   * just written. That is the "complete, never retried" hole (CEL-1533), and no
+   * plural-completeness check can see it: the file has every category it needs.
+   */
+  const evictedPerNamespace = new Map<string, Set<string>>();
 
   // Collect source files
   const sourceFiles: { name: string; path: string }[] = [];
@@ -564,8 +632,18 @@ export async function translate(
       const outputJSON = unflattenJSON(orderedOutput);
       writeFileSync(outputPath, JSON.stringify(outputJSON, null, 2) + "\n");
 
-      // Update cache
+      // Update cache. A key any language dropped stays dropped for the whole
+      // namespace, so the language that degraded it gets its retry next run.
+      let evicted = evictedPerNamespace.get(cacheKey);
+      if (!evicted) {
+        evicted = new Set<string>();
+        evictedPerNamespace.set(cacheKey, evicted);
+      }
+      for (const key of Object.keys(sourceFlat)) {
+        if (!(key in result.newCacheEntries)) evicted.add(key);
+      }
       fullCache[cacheKey] = result.newCacheEntries;
+      for (const key of evicted) delete fullCache[cacheKey][key];
 
       totalResult.translated += result.translated;
       totalResult.skipped += result.skipped;

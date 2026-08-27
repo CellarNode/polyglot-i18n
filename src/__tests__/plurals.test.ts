@@ -101,6 +101,49 @@ describe("collectPluralGroups", () => {
       "other",
     ]);
   });
+
+  /**
+   * CEL-1533.
+   *
+   * The `_other`-sibling guard was one-sided: it rejected a base with no
+   * `_other`, but accepted a base with NOTHING BUT `_other`. Expanding one of
+   * those invents `_one`/`_few`/`_many` siblings that i18next then serves
+   * whenever the count is not "other" — turning an enum member into four
+   * bogus locale keys.
+   */
+  describe("a lone _other variant", () => {
+    it("is not a plural group when its value has no count placeholder", () => {
+      // producer-dashboard imports.json: the "other" document kind.
+      const groups = collectPluralGroups(
+        { "document.kind_other": "Document" },
+        "ru"
+      );
+      expect(groups.size).toBe(0);
+    });
+
+    it("stays a plural group when its value carries a count placeholder", () => {
+      // producer-dashboard market.json: a genuine single-form plural, and the
+      // anti-vacuity pin for the rule above.
+      const groups = collectPluralGroups(
+        { listingCount_other: "{{count}} listings" },
+        "ru"
+      );
+      expect(groups.get("listingCount")?.targetCategories).toEqual([
+        "one",
+        "few",
+        "many",
+        "other",
+      ]);
+    });
+
+    it("stays a plural group as soon as it has any sibling category", () => {
+      const groups = collectPluralGroups(
+        { kind_one: "Kind", kind_other: "Kinds" },
+        "ru"
+      );
+      expect(groups.get("kind")?.sourceKeys).toEqual(["kind_one", "kind_other"]);
+    });
+  });
 });
 
 describe("incompletePluralSourceKeys", () => {
@@ -135,6 +178,56 @@ describe("incompletePluralSourceKeys", () => {
       item_other: "товара",
     };
     expect(incompletePluralSourceKeys(target, groups)).toHaveLength(2);
+  });
+
+  /**
+   * CEL-1533.
+   *
+   * A group whose every category holds the English source form is COMPLETE by
+   * key count and carries no translation at all — the shape 0.3.0 wrote to
+   * seven production locales. Nothing else can rescue it: the English source
+   * never changes, so the cache says "done" on every future run.
+   */
+  describe("a group filled with the English source", () => {
+    it("is flagged for regeneration even though every category is present", () => {
+      const target = {
+        item_one: "{{count}} item",
+        item_few: "{{count}} items",
+        item_many: "{{count}} items",
+        item_other: "{{count}} items",
+      };
+      expect(incompletePluralSourceKeys(target, groups)).toEqual([
+        "item_one",
+        "item_other",
+      ]);
+    });
+
+    it("is not flagged once even one category is really translated", () => {
+      const target = {
+        item_one: "{{count}} товар",
+        item_few: "{{count}} items",
+        item_many: "{{count}} items",
+        item_other: "{{count}} items",
+      };
+      expect(incompletePluralSourceKeys(target, groups)).toEqual([]);
+    });
+
+    it("leaves a single-form group alone, however identical it looks", () => {
+      // A filename, a slug or a Russian unit abbreviation is uniform BY
+      // NECESSITY. Flagging those would retranslate them on every run forever,
+      // so the check demands two DISTINCT English forms before it fires.
+      const filename = collectPluralGroups(
+        { "bulkExport.filename_other": "qr-labels-{{count}}.zip" },
+        "ru"
+      );
+      const target = {
+        "bulkExport.filename_one": "qr-labels-{{count}}.zip",
+        "bulkExport.filename_few": "qr-labels-{{count}}.zip",
+        "bulkExport.filename_many": "qr-labels-{{count}}.zip",
+        "bulkExport.filename_other": "qr-labels-{{count}}.zip",
+      };
+      expect(incompletePluralSourceKeys(target, filename)).toEqual([]);
+    });
   });
 });
 

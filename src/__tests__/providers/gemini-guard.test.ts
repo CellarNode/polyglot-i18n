@@ -195,7 +195,7 @@ describe("GeminiProvider.translate — corrective retry", () => {
 });
 
 describe("GeminiProvider.translate — byte-identical values", () => {
-  it("degrades rather than fails a value that is the English source", async () => {
+  it("fails a value that is the English source and ordinary vocabulary", async () => {
     const identical = JSON.stringify({
       "card.beverage_one": "Product",
       "card.beverage_other": "产品",
@@ -206,11 +206,37 @@ describe("GeminiProvider.translate — byte-identical values", () => {
 
     expect(generateContent).toHaveBeenCalledTimes(2);
     const entry = byKey(result)["card.beverage_one"];
-    // Writable, so `translateNamespace` can prefer the previous translation —
-    // and a legitimate identical value never exits the CLI non-zero.
+    // Corroborated echo: "Product" is on the vocabulary list, so after the one
+    // corrective retry the value is blocked rather than written. Blocked
+    // entries carry the English source only so the key set stays complete —
+    // `translateNamespace` writes the previous translation, or nothing
+    // (CEL-1542).
+    expect(entry.failed).toMatchObject({ reason: "identical-to-source" });
+    expect(entry.degraded).toBeUndefined();
+  });
+
+  it("degrades an uncorroborated identical value instead of failing it", async () => {
+    // Same shape, but the vocabulary has no signal for "Vintage" — so it stays
+    // writable and can never exit the CLI non-zero.
+    const vintage: TranslationEntry = {
+      key: "wine.vintage_one",
+      value: "Vintage",
+      plural: {
+        base: "wine.vintage",
+        sourceForms: { one: "Vintage", other: "Vintages" },
+        targetCategories: ["one", "other"],
+      },
+    };
+    respondWith(
+      JSON.stringify({ "wine.vintage_one": "Vintage", "wine.vintage_other": "年份" })
+    );
+
+    const result = await provider().translate([vintage], "zh");
+
+    const entry = byKey(result)["wine.vintage_one"];
     expect(entry.failed).toBeUndefined();
     expect(entry.degraded).toMatchObject({ reason: "identical-to-source" });
-    expect(entry.value).toBe("Product");
+    expect(entry.value).toBe("Vintage");
   });
 
   it("warns about a brand-only identical value without re-rolling the chunk", async () => {
@@ -370,6 +396,176 @@ describe("GeminiProvider.translate — missing and uniform values", () => {
     expect(result.failed).toBe(0);
     expect(result.errors).toEqual([]);
     expect(result.output["volume.ml_many"]).toBe("{{count}} мл");
+    expect(result.warnings.join("\n")).toContain("uniform-plural");
+    expect(Object.keys(result.newCacheEntries)).toEqual([]);
+  });
+});
+
+/**
+ * CEL-1542, P2.
+ *
+ * A plural group the model returns as the English source in every category
+ * ("Download labels" ×4) is corroborated by the vocabulary list, so it is a
+ * leak by every test this module has. 0.3.1 gave the identical-to-source branch
+ * `prefer-previous`, which WROTE English into the three fallback-category keys
+ * that had no previous translation. Recoverable — the group left the cache and
+ * the CLI still exited 1 on the `_one` block — but the write happened.
+ */
+describe("GeminiProvider.translate — a corroborated uniform echo", () => {
+  const DOWNLOAD: TranslationEntry = {
+    key: "download.labels_other",
+    value: "Download labels",
+    plural: {
+      base: "download.labels",
+      sourceForms: { one: "Download label", other: "Download labels" },
+      targetCategories: ["one", "few", "many", "other"],
+    },
+  };
+
+  const english = JSON.stringify({
+    "download.labels_one": "Download labels",
+    "download.labels_few": "Download labels",
+    "download.labels_many": "Download labels",
+    "download.labels_other": "Download labels",
+  });
+
+  it("marks every category failed rather than degraded", async () => {
+    respondWith(english, english);
+
+    const result = await provider().translate([DOWNLOAD], "ru");
+
+    expect(result).toHaveLength(4);
+    expect(result.every((e) => e.failed !== undefined)).toBe(true);
+    expect(result.some((e) => e.degraded !== undefined)).toBe(false);
+  });
+
+  it("writes no English into the fallback categories", async () => {
+    respondWith(english, english);
+
+    const result = await translateNamespace({
+      sourceFlat: {
+        "download.labels_one": "Download label",
+        "download.labels_other": "Download labels",
+      },
+      // The ru file has a real translation for `_one` only.
+      targetFlat: { "download.labels_one": "Скачать ярлык" },
+      cacheEntries: {},
+      provider: provider(),
+      targetLang: "ru",
+      force: false,
+    });
+
+    // The previous translation survives; the three categories with nothing to
+    // fall back on are left out entirely.
+    expect(result.output["download.labels_one"]).toBe("Скачать ярлык");
+    expect(result.output["download.labels_few"]).toBeUndefined();
+    expect(result.output["download.labels_many"]).toBeUndefined();
+    expect(result.output["download.labels_other"]).toBeUndefined();
+    expect(
+      Object.values(result.output).some((v) => v.includes("Download"))
+    ).toBe(false);
+    // Loud, and not cached, so the next run asks again.
+    expect(result.failed).toBe(4);
+    expect(Object.keys(result.newCacheEntries)).toEqual([]);
+  });
+
+  it("still writes a group the model actually translated", async () => {
+    // Anti-vacuity: the assertions above would pass for a guard that dropped
+    // every plural group it ever saw.
+    const translated = JSON.stringify({
+      "download.labels_one": "Скачать ярлык",
+      "download.labels_few": "Скачать ярлыка",
+      "download.labels_many": "Скачать ярлыков",
+      "download.labels_other": "Скачать ярлыки",
+    });
+    respondWith(translated);
+
+    const result = await translateNamespace({
+      sourceFlat: {
+        "download.labels_one": "Download label",
+        "download.labels_other": "Download labels",
+      },
+      targetFlat: {},
+      cacheEntries: {},
+      provider: provider(),
+      targetLang: "ru",
+      force: false,
+    });
+
+    expect(result.failed).toBe(0);
+    expect(result.output["download.labels_many"]).toBe("Скачать ярлыков");
+  });
+});
+
+/**
+ * CEL-1542, P3 — the documented cost, pinned so it cannot change unnoticed.
+ *
+ * A group that is uniform BY NECESSITY can never stop being suspect, so every
+ * run spends one corrective retry on it and then evicts it from the cache. The
+ * alternative is caching a value indistinguishable from a real
+ * under-differentiation, which is the CEL-1539 defect.
+ */
+describe("a correct-by-necessity uniform group pays the same cost on every run", () => {
+  const uniform = JSON.stringify({
+    "volume.ml_one": "{{count}} мл",
+    "volume.ml_few": "{{count}} мл",
+    "volume.ml_many": "{{count}} мл",
+    "volume.ml_other": "{{count}} мл",
+  });
+
+  const run = (targetFlat: Record<string, string>) => {
+    respondWith(uniform, uniform);
+    return translateNamespace({
+      sourceFlat: { "volume.ml_other": "{{count}} ml" },
+      targetFlat,
+      cacheEntries: {},
+      provider: provider(),
+      targetLang: "ru",
+      force: false,
+    });
+  };
+
+  it("retries and evicts again even when the file already holds the answer", async () => {
+    const settled = {
+      "volume.ml_one": "{{count}} мл",
+      "volume.ml_few": "{{count}} мл",
+      "volume.ml_many": "{{count}} мл",
+      "volume.ml_other": "{{count}} мл",
+    };
+
+    const result = await run(settled);
+
+    // One first pass plus one corrective retry — every run, for as long as the
+    // key exists.
+    expect(generateContent).toHaveBeenCalledTimes(2);
+    // Never a failure, and the right value is written.
+    expect(result.failed).toBe(0);
+    expect(result.output["volume.ml_many"]).toBe("{{count}} мл");
+    // Evicted, so the next run repeats the whole thing.
+    expect(Object.keys(result.newCacheEntries)).toEqual([]);
+  });
+
+  it("costs a Latin-script language the same — the check is outside the script gate", async () => {
+    respondWith(
+      JSON.stringify({
+        "volume.ml_one": "{{count}} ml",
+        "volume.ml_few": "{{count}} ml",
+        "volume.ml_many": "{{count}} ml",
+        "volume.ml_other": "{{count}} ml",
+      })
+    );
+
+    const result = await translateNamespace({
+      sourceFlat: { "volume.ml_other": "{{count}} ml" },
+      targetFlat: {},
+      cacheEntries: {},
+      provider: provider(),
+      // Polish needs four CLDR categories just as Russian does.
+      targetLang: "pl",
+      force: false,
+    });
+
+    expect(generateContent).toHaveBeenCalledTimes(2);
     expect(result.warnings.join("\n")).toContain("uniform-plural");
     expect(Object.keys(result.newCacheEntries)).toEqual([]);
   });
