@@ -1,0 +1,605 @@
+[
+  {
+    "repo": "producer-dashboard",
+    "lang": "zh",
+    "file": "portfolio.json",
+    "key": "create.producerPlaceholder",
+    "source": "e.g., William Grant & Sons",
+    "target": "例如：William Grant & Sons",
+    "expect": "clean"
+  },
+  {
+    "repo": "producer-dashboard",
+    "lang": "ru",
+    "file": "portfolio.json",
+    "key": "create.producerPlaceholder",
+    "source": "e.g., William Grant & Sons",
+    "target": "например, William Grant & Sons",
+    "expect": "clean"
+  },
+  {
+    "repo": "producer-dashboard",
+    "lang": "zh",
+    "file": "portfolio.json",
+    "key": "create.productNamePlaceholder",
+    "source": "e.g., Glenfiddich 12 Year",
+    "target": "例如：Glenfiddich 12 Year",
+    "expect": "clean"
+  },
+  {
+    "repo": "producer-dashboard",
+    "lang": "zh",
+    "file": "portfolio.json",
+    "key": "create.researchProducerPlaceholder",
+    "source": "e.g., The Macallan Distillery",
+    "target": "例如：The Macallan Distillery",
+    "expect": "clean"
+  },
+  {
+    "repo": "producer-dashboard",
+    "lang": "zh",
+    "file": "portfolio.json",
+    "key": "create.researchProductPlaceholder",
+    "source": "e.g., Macallan 18",
+    "target": "例如：Macallan 18",
+    "expect": "clean"
+  },
+  {
+    "repo": "producer-dashboard",
+    "lang": "zh",
+    "file": "portfolio.json",
+    "key": "edit.compositionHint",
+    "source": "One component per line. Optional percentages can be written like `Cabernet Sauvignon (60%)`.",
+    "target": "每行填写一种成分。可选百分比格式如 `Cabernet Sauvignon (60%)`。",
+    "expect": "clean"
+  },
+  {
+    "repo": "producer-dashboard",
+    "lang": "ru",
+    "file": "portfolio.json",
+    "key": "create.typePlaceholder",
+    "source": "e.g., Single Malt",
+    "target": "например, Single Malt",
+    "expect": "clean"
+  },
+  {
+    "repo": "producer-dashboard",
+    "lang": "zh",
+    "file": "qr-labels.json",
+    "key": "bulkExport.filename",
+    "source": "qr-labels-{{count}}.zip",
+    "target": "qr-labels-{{count}}.zip",
+    "expect": "clean"
+  },
+  {
+    "repo": "producer-dashboard",
+    "lang": "ru",
+    "file": "qr-labels.json",
+    "key": "bulkExport.filename",
+    "source": "qr-labels-{{count}}.zip",
+    "target": "qr-labels-{{count}}.zip",
+    "expect": "clean"
+  },
+  {
+    "repo": "producer-dashboard",
+    "lang": "zh",
+    "file": "offers.json",
+    "key": "form.composition.namePlaceholderWine",
+    "source": "e.g., Pinot Noir",
+    "target": "例如：黑皮诺 (Pinot Noir)",
+    "expect": "clean"
+  },
+  {
+    "repo": "producer-dashboard",
+    "lang": "ru",
+    "file": "offers.json",
+    "key": "form.composition.namePlaceholderWine",
+    "source": "e.g., Pinot Noir",
+    "target": "например, Пино Нуар",
+    "expect": "clean"
+  },
+  {
+    "repo": "producer-dashboard",
+    "lang": "zh",
+    "file": "offers.json",
+    "key": "form.sustainabilityCertExamples",
+    "source": "Fairtrade, Fair for Life, or Certified Sustainable Wine of Chile",
+    "target": "例如：Fairtrade、Fair for Life 或智利可持续葡萄酒认证 (Certified Sustainable Wine of Chile)",
+    "expect": "clean"
+  },
+  {
+    "repo": "producer-dashboard",
+    "lang": "ru",
+    "file": "offers.json",
+    "key": "form.sustainabilityCertExamples",
+    "source": "Fairtrade, Fair for Life, or Certified Sustainable Wine of Chile",
+    "target": "Fairtrade, Fair for Life или Certified Sustainable Wine of Chile",
+    "expect": "clean"
+  },
+  {
+    "repo": "producer-dashboard",
+    "lang": "zh",
+    "file": "common.json",
+    "key": "devtools.tanstackQuery",
+    "source": "TanStack Query",
+    "target": "TanStack Query",
+    "expect": "clean"
+  },
+  {
+    "repo": "producer-dashboard",
+    "lang": "ru",
+    "file": "common.json",
+    "key": "devtools.tanstackQuery",
+    "source": "TanStack Query",
+    "target": "TanStack Query",
+    "expect": "clean"
+  },
+  {
+    "repo": "producer-dashboard",
+    "lang": "zh",
+    "file": "organization.json",
+    "key": "brand.display.faviconLabel",
+    "source": "Favicon",
+    "target": "网站图标 (Favicon)",
+    "expect": "clean"
+  },
+  {
+    "repo": "producer-dashboard",
+    "lang": "ru",
+    "file": "organization.json",
+    "key": "brand.display.faviconLabel",
+    "source": "Favicon",
+    "target": "Фавикон",
+    "expect": "clean"
+  },
+  {
+    "repo": "producer-dashboard",
+    "lang": "zh",
+    "file": "organization.json",
+    "key": "brand.assetsTitle",
+    "source": "Logos & assets",
+    "target": "Logo 与资源",
+    "expect": "clean"
+  },
+  {
+    "repo": "producer-dashboard",
+    "lang": "ru",
+    "file": "organization.json",
+    "key": "brand.assetsTitle",
+    "source": "Logos & assets",
+    "target": "Логотипы и материалы",
+    "expect": "clean"
+  },
+  {
+    "repo": "producer-dashboard",
+    "lang": "zh",
+    "file": "market.json",
+    "key": "listing.deliveryTermsIncoterm2020",
+    "source": "Incoterm 2020",
+    "target": "2020年国际贸易术语解释通则 (Incoterm 2020)",
+    "expect": "clean"
+  },
+  {
+    "repo": "producer-dashboard",
+    "lang": "ru",
+    "file": "market.json",
+    "key": "listing.deliveryTermsIncoterm2020",
+    "source": "Incoterm 2020",
+    "target": "Incoterm 2020",
+    "expect": "clean"
+  },
+  {
+    "repo": "producer-dashboard",
+    "lang": "zh",
+    "file": "market.json",
+    "key": "listing.addToJourney",
+    "source": "Add to Journey",
+    "target": "添加到旅程",
+    "expect": "clean"
+  },
+  {
+    "repo": "producer-dashboard",
+    "lang": "ru",
+    "file": "market.json",
+    "key": "listing.addToJourney",
+    "source": "Add to Journey",
+    "target": "Добавить в Journey",
+    "expect": "clean"
+  },
+  {
+    "repo": "public-site",
+    "lang": "zh",
+    "file": "faq.json",
+    "key": "categories.monopoly.a5_point3",
+    "source": "Systembolaget generally runs blind tastings of 20–30 different beverages per tender request item",
+    "target": "Systembolaget 通常会对每个招标项目进行 20–30 种不同饮料的盲测",
+    "expect": "clean"
+  },
+  {
+    "repo": "public-site",
+    "lang": "ru",
+    "file": "faq.json",
+    "key": "categories.monopoly.a5_point3",
+    "source": "Systembolaget generally runs blind tastings of 20–30 different beverages per tender request item",
+    "target": "Systembolaget обычно проводит слепые дегустации 20–30 различных напитков по каждой тендерной позиции",
+    "expect": "clean"
+  },
+  {
+    "repo": "public-site",
+    "lang": "zh",
+    "file": "faq.json",
+    "key": "categories.monopoly.a1",
+    "source": "Yes. CellarNode is designed to operate fully within the official procedures of Systembolaget, Vinmonopolet, and Alko. All tenders are always submitted by licensed importers, exactly as required by each monopoly. CellarNode is simply a platform that helps producers prepare submissions, stay organized, and collaborate with the right importer — it is not a seller or contracting party.",
+    "target": "是的。CellarNode 的设计旨在完全符合 Systembolaget、Vinmonopolet 和 Alko 的官方程序。所有招标均由持牌进口商提交，完全符合各垄断机构的要求。CellarNode 仅是一个帮助生产商准备提交材料、保持条理并与合适的进口商协作的平台，它本身并非销售方或合同方。",
+    "expect": "clean"
+  },
+  {
+    "repo": "public-site",
+    "lang": "ru",
+    "file": "faq.json",
+    "key": "categories.monopoly.a1",
+    "source": "Yes. CellarNode is designed to operate fully within the official procedures of Systembolaget, Vinmonopolet, and Alko. All tenders are always submitted by licensed importers, exactly as required by each monopoly. CellarNode is simply a platform that helps producers prepare submissions, stay organized, and collaborate with the right importer — it is not a seller or contracting party.",
+    "target": "Да. Платформа CellarNode разработана для работы в полном соответствии с официальными процедурами Systembolaget, Vinmonopolet и Alko. Все тендерные заявки подаются лицензированными импортерами, как того требуют правила каждой монополии. CellarNode — это лишь платформа, помогающая производителям готовить заявки, систематизировать работу и взаимодействовать с нужным импортером; она не является продавцом или стороной по контракту.",
+    "expect": "clean"
+  },
+  {
+    "repo": "public-site",
+    "lang": "zh",
+    "file": "cookies.json",
+    "key": "policy.title",
+    "source": "Cookie Policy",
+    "target": "Cookie 政策",
+    "expect": "clean"
+  },
+  {
+    "repo": "public-site",
+    "lang": "ru",
+    "file": "cookies.json",
+    "key": "policy.title",
+    "source": "Cookie Policy",
+    "target": "Политика использования cookie",
+    "expect": "clean"
+  },
+  {
+    "repo": "public-site",
+    "lang": "zh",
+    "file": "cookies.json",
+    "key": "policy.analyticsCookie1Purpose",
+    "source": "Google Analytics — distinguishes unique visitors by assigning a randomly generated client ID.",
+    "target": "Google Analytics — 通过分配随机生成的客户端 ID 来区分唯一访客。",
+    "expect": "clean"
+  },
+  {
+    "repo": "public-site",
+    "lang": "ru",
+    "file": "cookies.json",
+    "key": "policy.analyticsCookie1Purpose",
+    "source": "Google Analytics — distinguishes unique visitors by assigning a randomly generated client ID.",
+    "target": "Google Analytics — различает уникальных посетителей путем присвоения случайно сгенерированного идентификатора клиента.",
+    "expect": "clean"
+  },
+  {
+    "repo": "public-site",
+    "lang": "zh",
+    "file": "footer.json",
+    "key": "links.cookies",
+    "source": "Cookie Policy",
+    "target": "Cookie 政策",
+    "expect": "clean"
+  },
+  {
+    "repo": "public-site",
+    "lang": "ru",
+    "file": "footer.json",
+    "key": "links.cookies",
+    "source": "Cookie Policy",
+    "target": "Политика использования файлов cookie",
+    "expect": "clean"
+  },
+  {
+    "repo": "public-site",
+    "lang": "zh",
+    "file": "auth.json",
+    "key": "comingSoon.emailPlaceholder",
+    "source": "Enter your email",
+    "target": "请输入您的邮箱",
+    "expect": "clean"
+  },
+  {
+    "repo": "public-site",
+    "lang": "ru",
+    "file": "auth.json",
+    "key": "comingSoon.emailPlaceholder",
+    "source": "Enter your email",
+    "target": "Введите ваш email",
+    "expect": "clean"
+  },
+  {
+    "repo": "public-site",
+    "lang": "zh",
+    "file": "home.json",
+    "key": "heroEmailPlaceholder",
+    "source": "Enter your email",
+    "target": "请输入您的邮箱",
+    "expect": "clean"
+  },
+  {
+    "repo": "public-site",
+    "lang": "ru",
+    "file": "home.json",
+    "key": "heroEmailPlaceholder",
+    "source": "Enter your email",
+    "target": "Введите ваш email",
+    "expect": "clean"
+  },
+  {
+    "repo": "importer-dashboard",
+    "lang": "zh",
+    "file": "organization.json",
+    "key": "team.memberEmail",
+    "source": "Member email",
+    "target": "成员电子邮箱",
+    "expect": "clean"
+  },
+  {
+    "repo": "importer-dashboard",
+    "lang": "ru",
+    "file": "organization.json",
+    "key": "team.memberEmail",
+    "source": "Member email",
+    "target": "Email участника",
+    "expect": "clean"
+  },
+  {
+    "repo": "producer-dashboard",
+    "lang": "zh",
+    "file": "elabels.json",
+    "key": "empty.cta",
+    "source": "Create e-label",
+    "target": "创建电子标签",
+    "expect": "clean"
+  },
+  {
+    "repo": "producer-dashboard",
+    "lang": "ru",
+    "file": "elabels.json",
+    "key": "empty.cta",
+    "source": "Create e-label",
+    "target": "Создать e-label",
+    "expect": "clean"
+  },
+  {
+    "repo": "producer-dashboard",
+    "lang": "zh",
+    "file": "elabels.json",
+    "key": "publish.success",
+    "source": "E-label published successfully.",
+    "target": "电子标签发布成功。",
+    "expect": "clean"
+  },
+  {
+    "repo": "producer-dashboard",
+    "lang": "ru",
+    "file": "elabels.json",
+    "key": "publish.success",
+    "source": "E-label published successfully.",
+    "target": "E-label успешно опубликован.",
+    "expect": "clean"
+  },
+  {
+    "repo": "producer-dashboard",
+    "lang": "zh",
+    "file": "common.json",
+    "key": "loading",
+    "source": "Loading…",
+    "target": "加载中…",
+    "expect": "clean"
+  },
+  {
+    "repo": "producer-dashboard",
+    "lang": "ru",
+    "file": "common.json",
+    "key": "loading",
+    "source": "Loading…",
+    "target": "Загрузка…",
+    "expect": "clean"
+  },
+  {
+    "repo": "public-site",
+    "lang": "zh",
+    "file": "pricing.json",
+    "key": "tiers.enterprise.highlights.standard",
+    "source": "Everything in Standard",
+    "target": "包含标准版所有功能",
+    "expect": "clean"
+  },
+  {
+    "repo": "public-site",
+    "lang": "ru",
+    "file": "pricing.json",
+    "key": "tiers.enterprise.highlights.standard",
+    "source": "Everything in Standard",
+    "target": "Все функции Standard",
+    "expect": "clean"
+  },
+  {
+    "repo": "producer-dashboard",
+    "lang": "zh",
+    "file": "portfolio.json",
+    "key": "create.researchTitle",
+    "source": "BeveriQ Research Agent",
+    "target": "BeveriQ 研究助手",
+    "expect": "clean"
+  },
+  {
+    "repo": "producer-dashboard",
+    "lang": "ru",
+    "file": "portfolio.json",
+    "key": "create.researchTitle",
+    "source": "BeveriQ Research Agent",
+    "target": "Агент BeveriQ Research",
+    "expect": "clean"
+  },
+  {
+    "repo": "public-site",
+    "lang": "zh",
+    "file": "about.json",
+    "key": "marcusBio",
+    "source": "Marcus brings deep expertise in building scalable platforms that handle complex matching and search operations. Previously leading engineering teams at Nordic tech companies, he now architects the intelligent systems that power CellarNode's semantic matching engine.",
+    "target": "Marcus 在构建处理复杂匹配和搜索操作的可扩展平台方面拥有深厚的专业知识。他曾领导多家北欧科技公司的工程团队，现负责架构驱动 CellarNode 语义匹配引擎的智能系统。",
+    "expect": "clean"
+  },
+  {
+    "repo": "public-site",
+    "lang": "ru",
+    "file": "about.json",
+    "key": "marcusBio",
+    "source": "Marcus brings deep expertise in building scalable platforms that handle complex matching and search operations. Previously leading engineering teams at Nordic tech companies, he now architects the intelligent systems that power CellarNode's semantic matching engine.",
+    "target": "Маркус обладает глубоким опытом в создании масштабируемых платформ для сложных операций поиска и сопоставления данных. Ранее возглавляя инженерные команды в скандинавских технологических компаниях, теперь он проектирует интеллектуальные системы, лежащие в основе семантического движка CellarNode.",
+    "expect": "clean"
+  },
+  {
+    "repo": "public-site",
+    "lang": "zh",
+    "file": "cookies.json",
+    "key": "banner.linkText",
+    "source": "cookie policy",
+    "target": "Cookie 政策",
+    "expect": "clean"
+  },
+  {
+    "repo": "public-site",
+    "lang": "ru",
+    "file": "cookies.json",
+    "key": "banner.linkText",
+    "source": "cookie policy",
+    "target": "политика использования cookie",
+    "expect": "clean"
+  },
+  {
+    "repo": "public-site",
+    "lang": "zh",
+    "file": "learn.json",
+    "key": "roadmap.milestone7Desc",
+    "source": "Advanced security, compliance, and white-label solutions",
+    "target": "高级安全性、合规性及白标解决方案",
+    "expect": "clean"
+  },
+  {
+    "repo": "public-site",
+    "lang": "ru",
+    "file": "learn.json",
+    "key": "roadmap.milestone7Desc",
+    "source": "Advanced security, compliance, and white-label solutions",
+    "target": "Расширенная безопасность, соответствие требованиям и решения White-label",
+    "expect": "clean"
+  },
+  {
+    "repo": "public-site",
+    "lang": "zh",
+    "file": "learn.json",
+    "key": "nordicMonopolies.operateParagraph1",
+    "source": "<strong>Systembolaget</strong>, <strong>Vinmonopolet</strong>, and <strong>Alko</strong> are state-owned but commercially agile retailers. They follow strict procurement rules, sustainability commitments, and transparency requirements — yet each runs its own independent tender structure.",
+    "target": "<strong>Systembolaget</strong>、<strong>Vinmonopolet</strong> 和 <strong>Alko</strong> 均为国有但商业运作灵活的零售商。它们遵循严格的采购规则、可持续发展承诺和透明度要求，但各自运行着独立的招标结构。",
+    "expect": "clean"
+  },
+  {
+    "repo": "public-site",
+    "lang": "ru",
+    "file": "learn.json",
+    "key": "nordicMonopolies.operateParagraph1",
+    "source": "<strong>Systembolaget</strong>, <strong>Vinmonopolet</strong>, and <strong>Alko</strong> are state-owned but commercially agile retailers. They follow strict procurement rules, sustainability commitments, and transparency requirements — yet each runs its own independent tender structure.",
+    "target": "<strong>Systembolaget</strong>, <strong>Vinmonopolet</strong> и <strong>Alko</strong> — это государственные, но коммерчески гибкие ритейлеры. Они следуют строгим правилам закупок, обязательствам по устойчивому развитию и требованиям прозрачности, однако каждая из них управляет своей независимой тендерной структурой.",
+    "expect": "clean"
+  },
+  {
+    "repo": "producer-dashboard",
+    "lang": "zh",
+    "file": "elabels.json",
+    "key": "unavailable.devHint",
+    "source": "Dev: run make elabel-dev in cellarnode-backend-v2 to start the e-label API on port 4004.",
+    "target": "开发：在 cellarnode-backend-v2 中运行 make elabel-dev 以在 4004 端口启动电子标签 API。",
+    "expect": "clean"
+  },
+  {
+    "repo": "producer-dashboard",
+    "lang": "ru",
+    "file": "elabels.json",
+    "key": "unavailable.devHint",
+    "source": "Dev: run make elabel-dev in cellarnode-backend-v2 to start the e-label API on port 4004.",
+    "target": "Dev: выполните make elabel-dev в cellarnode-backend-v2, чтобы запустить API e-label на порту 4004.",
+    "expect": "clean"
+  },
+  {
+    "repo": "producer-dashboard",
+    "lang": "zh",
+    "file": "organization.json",
+    "key": "inviteDialog.emailRoleRequired",
+    "source": "Email and role are required.",
+    "target": "电子邮件和角色为必填项。",
+    "expect": "clean"
+  },
+  {
+    "repo": "producer-dashboard",
+    "lang": "ru",
+    "file": "organization.json",
+    "key": "inviteDialog.emailRoleRequired",
+    "source": "Email and role are required.",
+    "target": "Email и роль обязательны для заполнения.",
+    "expect": "clean"
+  },
+  {
+    "repo": "producer-dashboard",
+    "lang": "zh",
+    "file": "sprint.json",
+    "key": "completed.backToJourney",
+    "source": "Back to Producer Journey",
+    "target": "返回生产商旅程",
+    "expect": "clean"
+  },
+  {
+    "repo": "producer-dashboard",
+    "lang": "ru",
+    "file": "sprint.json",
+    "key": "completed.backToJourney",
+    "source": "Back to Producer Journey",
+    "target": "Назад к Producer Journey",
+    "expect": "clean"
+  },
+  {
+    "repo": "importer-dashboard",
+    "lang": "ru",
+    "file": "offers.json",
+    "key": "counterError.conflict",
+    "source": "Conflict: please reload and retry.",
+    "target": "Conflict: please reload and retry.",
+    "expect": "leak"
+  },
+  {
+    "repo": "importer-dashboard",
+    "lang": "ru",
+    "file": "offers.json",
+    "key": "loadingOfferDetail",
+    "source": "Loading offer detail",
+    "target": "Loading offer",
+    "expect": "leak"
+  },
+  {
+    "repo": "cellarnode-i18n",
+    "lang": "zh",
+    "file": "common.json",
+    "key": "save",
+    "source": "Save",
+    "target": "Save",
+    "expect": "leak"
+  },
+  {
+    "repo": "cellarnode-i18n",
+    "lang": "ru",
+    "file": "common.json",
+    "key": "noResults",
+    "source": "No results found",
+    "target": "No results found",
+    "expect": "leak"
+  }
+]

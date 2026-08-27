@@ -67,6 +67,15 @@ export function getPluralCategories(
   }
 }
 
+/**
+ * Which CLDR rule set a plural base resolves against. i18next marks ordinal
+ * plurals with an `_ordinal` segment, and the two sets differ sharply — ru has
+ * four cardinal categories but a single ordinal one.
+ */
+export function pluralTypeForBase(base: string): "cardinal" | "ordinal" {
+  return base.endsWith(ORDINAL_SUFFIX) ? "ordinal" : "cardinal";
+}
+
 export interface PluralGroup {
   /** Key prefix shared by every variant, e.g. `portfolio.item`. */
   base: string;
@@ -120,7 +129,7 @@ export function collectPluralGroups(
       groups.delete(base);
       continue;
     }
-    const type = base.endsWith(ORDINAL_SUFFIX) ? "ordinal" : "cardinal";
+    const type = pluralTypeForBase(base);
     group.targetCategories = sortCategories([
       ...Object.keys(group.sourceForms),
       ...getPluralCategories(targetLang, type),

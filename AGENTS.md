@@ -92,6 +92,17 @@ languages with fewer categories (zh, ja) never lose translations. Detection requ
 sibling, which keeps incidental keys like `step_one` out of the expansion path. DeepL does not opt
 in (`TranslationProvider.supportsPluralExpansion`) and keeps the flat English key set.
 
+## Translation-quality guard
+
+`src/leak-guard.ts` inspects parsed Gemini output before anything is written: untranslated
+English echoed into a non-Latin-script target, a key the model never returned, and plural
+categories that came back byte-identical in a language with more than two of them. A suspicious
+chunk gets exactly one corrective retry; values that are still bad are marked
+`TranslationEntry.failed` and never written — `translateNamespace` keeps the previous
+translation, counts the key as failed, and drops it from the cache so the next run retries it.
+The parser NEVER substitutes the English source for a missing key; that backfill is what shipped
+429 English strings to production in 0.3.0 (CEL-1539).
+
 ## CRITICAL: do not run `instrument`
 
 **NEVER run `polyglot-i18n instrument`** — it wraps CSS values, gradient strings, class names, and non-text content with `t()`, breaks rendering, and produces garbage translation keys. Always add `t()` calls manually, component by component.

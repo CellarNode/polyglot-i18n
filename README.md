@@ -164,6 +164,62 @@ Details worth knowing:
 - **Gemini only.** DeepL translates strings, not key sets, so the DeepL provider keeps writing
   the flat English key set.
 
+## Translation-quality guard
+
+Gemini output is inspected before it is written (`src/leak-guard.ts`). A value is flagged when it
+
+- is **missing or empty**, where earlier versions silently wrote the English source instead;
+- carries **English words copied from the source**, for a target language written in a non-Latin
+  script (`zh`, `ru`, `uk`, `ar`, ...);
+- is **byte-identical to the English source**, in the same non-Latin targets;
+- repeats one identical string across **every plural category** of a language that grammatically
+  distinguishes more than two, while the English source is count-sensitive (its forms differ, or
+  it carries a `{{count}}` placeholder). Ordinal groups (`_ordinal_*`) resolve against ordinal
+  CLDR rules, where `ru` has a single category and one repeated form is correct.
+
+A chunk with any flagged value is sent back to the model **once**, with the specific problems
+named. Only these hard flags earn that retry — an imperfect-but-usable value (a category copied
+from a translated `_other`) is reported as a warning and never costs a second API call. The retry
+is merged **per key**: a key is replaced only when it was flagged *and* the retry improved it, so
+a correction can never drop a value that was already good.
+
+What happens to a value that is still flagged afterwards depends on what it is:
+
+| Shape | Outcome |
+| --- | --- |
+| English spliced into a translated value, missing value, uniform plural group | **Blocked.** The previous translation is kept, or the key is left out of the file entirely. Counted in `failed`, reported in `errors`, dropped from the cache. |
+| Byte-identical to the source | **Never blocked.** The previous translation wins if there is one; otherwise the value is written. Reported as a warning and dropped from the cache, never counted in `failed`. |
+| A category copied from a translated `_other` | **Written**, reported as a warning. |
+
+English is never written over a gap on any path — including an API outage, where a failed chunk
+keeps existing translations and omits the keys that have none.
+
+The byte-identical case is deliberately non-fatal. Filenames (`qr-labels-{{count}}.zip`), slugs
+and brand-only labels (`Systembolaget`, `TanStack Query`) are identical by necessity, and failing
+them would exit the CLI non-zero on every run with no way to satisfy it. Only the target file can
+tell those apart from a real leak, so the decision is made there.
+
+### What is never reported as a leak
+
+The echo detector is biased towards silence, because a false positive is unrecoverable: the key is
+dropped, the cache entry is removed, and the next run fails it again. Exempt from the check:
+
+- placeholders, HTML tags, URLs and email addresses (`{{count}}`, `<strong>`, `https://…`);
+- brand spellings — an all-caps or internal-capital word (`PDF`, `QR`, `CellarNode`, `TanStack`);
+- **proper nouns**: a Titlecase word away from a sentence start (`Pinot Noir`,
+  `William Grant & Sons`, `Producer Journey`, `Google Analytics`, `Yellow Label`);
+- anything outside `TRANSLATABLE_WORDS`, the list of ordinary UI vocabulary in `leak-guard.ts`.
+  An unknown word is assumed to be a domain term or a loanword a locale keeps on purpose —
+  `cookie`, `email`, `e-label`, `Logo`, `Favicon`, `Incoterm`, `Systembolaget`.
+
+`src/__tests__/leak-guard-corpus.test.ts` replays the detector over verbatim `en`→`zh`/`ru` pairs
+taken from the locale files shipping in producer-dashboard, importer-dashboard, public-site and
+`@cellarnode/i18n`, and asserts that none of them is reported.
+
+Latin-script targets (`fr`, `de`, `it`, `es`, `sv`) get the prompt hardening but neither the
+source-echo nor the identical-value check: a stray `option` there is indistinguishable from a
+loanword.
+
 ## Providers
 
 ### Google Gemini

@@ -21,6 +21,25 @@ export interface TranslationEntry {
    * `targetCategories` member instead of a single entry for `key`.
    */
   plural?: PluralExpansion;
+  /**
+   * Set by a provider when the returned value could not be trusted — it echoed
+   * the English source, or the model produced no target form at all (CEL-1539).
+   * `value` then carries the English source only so the key set stays complete;
+   * consumers MUST NOT write it. `translateNamespace` counts these as failures,
+   * keeps any previous translation, and leaves the key out of the cache so the
+   * next run retries it.
+   */
+  failed?: { reason: string; detail: string };
+  /**
+   * Set by a provider when the value is questionable but not provably wrong —
+   * chiefly a value byte-identical to the English source, which is what both a
+   * leak and an untranslatable string (filename, slug, brand-only label) look
+   * like. `value` is real output and MAY be written: `translateNamespace`
+   * prefers any previous translation, falls back to `value`, and reports a
+   * warning either way. It is never counted as a failure, so a legitimate
+   * identical value cannot turn the CLI non-zero.
+   */
+  degraded?: { reason: string; detail: string };
 }
 
 export interface TranslationProvider {
