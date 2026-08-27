@@ -225,7 +225,7 @@ describe("translateNamespace — non-English plural categories (CEL-1267)", () =
     expect(result.output.item_many).toBe("товаров");
   });
 
-  it("falls back to English forms for every category when a chunk fails", async () => {
+  it("omits every category rather than writing English when a chunk fails", async () => {
     const provider: TranslationProvider = {
       name: "exploding",
       supportsPluralExpansion: true,
@@ -244,13 +244,13 @@ describe("translateNamespace — non-English plural categories (CEL-1267)", () =
     });
 
     expect(result.errors).toHaveLength(1);
-    expect(Object.keys(result.output).sort()).toEqual([
-      "item_few",
-      "item_many",
-      "item_one",
-      "item_other",
-    ]);
-    expect(result.output.item_many).toBe("{{count}} items");
+    // Same semantics as the guard path: an API outage is no better a reason to
+    // write the English source over a gap than a bad model response is.
+    expect(result.output).toEqual({});
+    // One failure per EMITTED key — the ru group is four of them.
+    expect(result.failed).toBe(4);
+    // ...but `translated` counts SOURCE keys, so it must not go to -2.
+    expect(result.translated).toBe(0);
   });
 
   it("leaves providers without plural support on the flat English key set", async () => {
@@ -400,6 +400,9 @@ describe("leak-guard failures (CEL-1539)", () => {
 
     expect(result.output).toEqual({});
     expect(result.failed).toBe(4);
+    // `failed` counts emitted keys; `translated` counts source keys, and
+    // `item_one`/`item_other` are the only two of those.
+    expect(result.translated).toBe(0);
     expect(Object.keys(result.newCacheEntries)).toEqual([]);
   });
 
@@ -421,11 +424,82 @@ describe("leak-guard failures (CEL-1539)", () => {
       force: true,
     });
 
-    // Existing Russian survives; only the categories that never existed fall
-    // back to English, and no key is cached as done.
+    // Existing Russian survives; the categories that never existed are left
+    // out entirely rather than filled with English, and nothing is cached.
     expect(result.output.item_one).toBe("{{count}} товар");
     expect(result.output.item_other).toBe("{{count}} товара");
-    expect(result.output.item_many).toBe("{{count}} items");
+    expect(result.output.item_many).toBeUndefined();
     expect(Object.keys(result.newCacheEntries)).toEqual([]);
+  });
+});
+
+/**
+ * A `degraded` entry is real output that the provider could not vouch for —
+ * chiefly a value byte-identical to the English source. It is written, or
+ * beaten by a previous translation, but never counted as a failure.
+ */
+function createDegradingProvider(value: string): TranslationProvider {
+  return {
+    name: "degrading",
+    supportsPluralExpansion: true,
+    translate: vi.fn(async (entries: TranslationEntry[]) =>
+      entries.map((e) => ({
+        key: e.key,
+        value,
+        degraded: {
+          reason: "identical-to-source",
+          detail: "value is the English source verbatim",
+        },
+      }))
+    ),
+  };
+}
+
+describe("degraded values (CEL-1539 review)", () => {
+  it("prefers the previous translation over a value identical to the source", async () => {
+    const result = await translateNamespace({
+      sourceFlat: { "card.beverage": "Product" },
+      targetFlat: { "card.beverage": "产品" },
+      cacheEntries: {},
+      provider: createDegradingProvider("Product"),
+      targetLang: "zh",
+      force: true,
+    });
+
+    expect(result.output["card.beverage"]).toBe("产品");
+    // Never a failure — the CLI exits non-zero on `failed > 0`, and a filename
+    // or brand-only label is byte-identical by necessity.
+    expect(result.failed).toBe(0);
+    expect(result.errors).toEqual([]);
+    expect(result.warnings[0]).toContain("card.beverage");
+    expect(result.warnings[0]).toContain("kept the previous translation");
+  });
+
+  it("writes the value when there is no previous translation to keep", async () => {
+    const result = await translateNamespace({
+      sourceFlat: { filename: "qr-labels-{{count}}.zip" },
+      targetFlat: {},
+      cacheEntries: {},
+      provider: createDegradingProvider("qr-labels-{{count}}.zip"),
+      targetLang: "zh",
+      force: false,
+    });
+
+    expect(result.output.filename).toBe("qr-labels-{{count}}.zip");
+    expect(result.failed).toBe(0);
+    expect(result.warnings[0]).toContain("wrote it anyway");
+  });
+
+  it("leaves a degraded key out of the cache so the next run retries it", async () => {
+    const result = await translateNamespace({
+      sourceFlat: { "card.beverage": "Product" },
+      targetFlat: { "card.beverage": "产品" },
+      cacheEntries: {},
+      provider: createDegradingProvider("Product"),
+      targetLang: "zh",
+      force: true,
+    });
+
+    expect("card.beverage" in result.newCacheEntries).toBe(false);
   });
 });

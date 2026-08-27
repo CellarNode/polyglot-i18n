@@ -125,8 +125,9 @@ program
           console.log(`    ${e}`);
         }
         console.log(
-          `\n  Failed chunks used source text as fallback.\n` +
-            `  Re-run to retry failed translations.\n`
+          `\n  Failed keys kept their previous translation, or were left out of\n` +
+            `  the file — the English source is never written over a gap.\n` +
+            `  They are not cached, so re-running retries them.\n`
         );
       }
 

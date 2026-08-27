@@ -30,6 +30,16 @@ export interface TranslationEntry {
    * next run retries it.
    */
   failed?: { reason: string; detail: string };
+  /**
+   * Set by a provider when the value is questionable but not provably wrong —
+   * chiefly a value byte-identical to the English source, which is what both a
+   * leak and an untranslatable string (filename, slug, brand-only label) look
+   * like. `value` is real output and MAY be written: `translateNamespace`
+   * prefers any previous translation, falls back to `value`, and reports a
+   * warning either way. It is never counted as a failure, so a legitimate
+   * identical value cannot turn the CLI non-zero.
+   */
+  degraded?: { reason: string; detail: string };
 }
 
 export interface TranslationProvider {

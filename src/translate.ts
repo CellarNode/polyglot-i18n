@@ -245,6 +245,9 @@ export async function translateNamespace(opts: {
   const chunks = chunkEntries(entries, CHUNK_SIZE);
   const translatedEntries: TranslationEntry[] = [];
   const failedSourceKeys = new Set<string>();
+  // Degraded keys are not failures, but they still leave the cache so the next
+  // run gets another attempt at a real translation.
+  const degradedSourceKeys = new Set<string>();
   const startTime = Date.now();
 
   for (let i = 0; i < chunks.length; i++) {
@@ -265,21 +268,18 @@ export async function translateNamespace(opts: {
       errors.push(
         `chunk ${i + 1}/${chunks.length}: ${errMsg}`
       );
-      failedKeys += chunk.length;
 
       // On chunk failure, keep the previous translation where there is one and
-      // only fall back to the English source for keys the target has never had
-      // — an API outage must not overwrite a good translation with English.
+      // otherwise leave the key out entirely — writing the English source over
+      // a gap is the CEL-1539 defect, and an API outage is no better a reason
+      // for it than a bad model response. Same semantics as the guard path.
       for (const entry of chunk) {
         for (const fallback of expandPluralFallback(entry)) {
+          failedKeys++;
           const previous = targetFlat[fallback.key];
-          translatedEntries.push({
-            key: fallback.key,
-            value:
-              previous !== undefined && previous !== ""
-                ? previous
-                : fallback.value,
-          });
+          if (previous !== undefined && previous !== "") {
+            translatedEntries.push({ key: fallback.key, value: previous });
+          }
           for (const key of sourceKeysFor(
             fallback.key,
             sourceFlat,
@@ -327,6 +327,26 @@ export async function translateNamespace(opts: {
       continue;
     }
 
+    // A questionable-but-usable value (chiefly one byte-identical to the
+    // English source). Never a failure: a filename or a brand-only label is
+    // identical by necessity, and failing it would exit non-zero forever. Any
+    // previous translation wins, because only the target file can tell a real
+    // leak from a string that has no other form.
+    if (entry.degraded) {
+      const previous = targetFlat[entry.key];
+      const keepPrevious = previous !== undefined && previous !== "";
+      output[entry.key] = keepPrevious ? previous : entry.value;
+      warnings.push(
+        `Key "${entry.key}": ${entry.degraded.reason} — ${entry.degraded.detail}; ` +
+          (keepPrevious ? "kept the previous translation" : "wrote it anyway")
+      );
+      // Left out of the cache so the next run gets another chance at it.
+      for (const key of sourceKeysFor(entry.key, sourceFlat, pluralGroups)) {
+        degradedSourceKeys.add(key);
+      }
+      continue;
+    }
+
     output[entry.key] = entry.value;
     const source = resolveSourceValue(entry.key, sourceFlat, pluralGroups);
     if (source === undefined) continue;
@@ -337,10 +357,17 @@ export async function translateNamespace(opts: {
   // the source hash unchanged and skip it forever.
   const newCacheEntries = buildCacheEntries(sourceFlat);
   for (const key of failedSourceKeys) delete newCacheEntries[key];
+  for (const key of degradedSourceKeys) delete newCacheEntries[key];
 
+  // `failedKeys` counts EMITTED keys (a ru plural group is four of them) —
+  // that is what `errors` reports. `translated` is a count of SOURCE keys, so
+  // it has to subtract failed source keys, not emitted ones, or a single failed
+  // group would subtract four from a two-key total.
+  const failedSourceCount = (keys: string[]) =>
+    keys.reduce((n, key) => n + (failedSourceKeys.has(key) ? 1 : 0), 0);
   const translatedCount = force
-    ? keysToTranslate.length - failedKeys
-    : diff.missing.length - failedKeys;
+    ? keysToTranslate.length - failedSourceCount(keysToTranslate)
+    : diff.missing.length - failedSourceCount(diff.missing);
 
   return {
     translated: Math.max(0, translatedCount),

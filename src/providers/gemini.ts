@@ -221,21 +221,30 @@ export function parseGeminiResponse(
 }
 
 /**
- * Entries for keys that stayed suspicious after the corrective retry. They
- * carry the English source as `value` so callers keep a complete key set, but
- * `failed` marks them un-writable — `translateNamespace` counts them as
- * failures and keeps the previous translation instead.
+ * Applies the surviving suspects to the parsed entries.
+ *
+ * `block` suspects carry the English source as `value` so callers keep a
+ * complete key set, but `failed` marks them un-writable. `prefer-previous`
+ * suspects stay writable and are marked `degraded`: `translateNamespace` uses
+ * the previous translation if the target file has one, and only writes the
+ * value (with a warning) when there is no previous translation to keep. That
+ * distinction is the whole point — a byte-identical value can be a leak or a
+ * filename, and only the target file knows which.
  */
-function markFailed(
+function applySuspects(
   requested: TranslationEntry[],
   parsed: ParsedResponse,
   suspects: LeakSuspect[]
 ): TranslationEntry[] {
-  const fatal = new Map<string, LeakSuspect>();
+  const blocked = new Map<string, LeakSuspect>();
+  const degraded = new Map<string, LeakSuspect>();
   for (const suspect of suspects) {
-    if (suspect.severity === "fail") fatal.set(suspect.key, suspect);
+    if (suspect.disposition === "block") blocked.set(suspect.key, suspect);
+    else if (suspect.disposition === "prefer-previous") {
+      degraded.set(suspect.key, suspect);
+    }
   }
-  if (fatal.size === 0) return parsed.entries;
+  if (blocked.size === 0 && degraded.size === 0) return parsed.entries;
 
   const englishFor = new Map<string, string>();
   for (const entry of requested) {
@@ -251,19 +260,29 @@ function markFailed(
     }
   }
 
+  const mark = (entry: TranslationEntry): TranslationEntry => {
+    const block = blocked.get(entry.key);
+    if (block) {
+      return {
+        key: entry.key,
+        value: englishFor.get(entry.key) ?? entry.value,
+        failed: { reason: block.reason, detail: block.detail },
+      };
+    }
+    const soft = degraded.get(entry.key);
+    if (soft) {
+      return {
+        ...entry,
+        degraded: { reason: soft.reason, detail: soft.detail },
+      };
+    }
+    return entry;
+  };
+
   const result: TranslationEntry[] = [];
   const emitted = new Set<string>();
   for (const entry of parsed.entries) {
-    const suspect = fatal.get(entry.key);
-    result.push(
-      suspect
-        ? {
-            key: entry.key,
-            value: englishFor.get(entry.key) ?? entry.value,
-            failed: { reason: suspect.reason, detail: suspect.detail },
-          }
-        : entry
-    );
+    result.push(mark(entry));
     emitted.add(entry.key);
   }
 
@@ -271,7 +290,7 @@ function markFailed(
   for (const entry of requested) {
     for (const key of expectedKeys(entry)) {
       if (emitted.has(key)) continue;
-      const suspect = fatal.get(key);
+      const suspect = blocked.get(key);
       if (!suspect) continue;
       result.push({
         key,
@@ -284,6 +303,64 @@ function markFailed(
 
   return result;
 }
+
+/**
+ * Folds a corrective retry into the first pass, per key.
+ *
+ * Only keys that were suspect in the first pass are eligible for replacement,
+ * and only when the retry actually improved them — the retry sees the same
+ * prompt plus a correction, so it can just as easily drop a key that was fine.
+ * Replacing the chunk wholesale would turn a partially-good answer into a worse
+ * one, which is how a warn-level chunk used to come back with missing keys.
+ */
+export function mergeCorrectiveRetry(
+  first: ParsedResponse,
+  retry: ParsedResponse,
+  suspectKeys: ReadonlySet<string>,
+  retrySuspectKeys: ReadonlySet<string>
+): ParsedResponse {
+  const retryByKey = new Map(retry.entries.map((e) => [e.key, e]));
+  const merged: TranslationEntry[] = [];
+  const taken = new Set<string>();
+
+  for (const entry of first.entries) {
+    const replacement = retryByKey.get(entry.key);
+    const improved =
+      replacement !== undefined &&
+      suspectKeys.has(entry.key) &&
+      !retrySuspectKeys.has(entry.key);
+    merged.push(improved ? replacement : entry);
+    taken.add(entry.key);
+  }
+
+  // A key the first pass could not resolve is adopted from the retry whenever
+  // the retry produced something the guard is happy with.
+  for (const entry of retry.entries) {
+    if (taken.has(entry.key)) continue;
+    if (retrySuspectKeys.has(entry.key)) continue;
+    merged.push(entry);
+    taken.add(entry.key);
+  }
+
+  const filledFromOther = new Set<string>();
+  for (const key of first.filledFromOther) {
+    if (!suspectKeys.has(key) || retrySuspectKeys.has(key)) {
+      filledFromOther.add(key);
+    }
+  }
+  for (const key of retry.filledFromOther) {
+    if (suspectKeys.has(key) && !retrySuspectKeys.has(key)) {
+      filledFromOther.add(key);
+    }
+  }
+
+  const unresolved = new Set<string>();
+  for (const key of first.unresolved) if (!taken.has(key)) unresolved.add(key);
+  for (const key of retry.unresolved) if (!taken.has(key)) unresolved.add(key);
+
+  return { entries: merged, filledFromOther, unresolved };
+}
+
 
 
 function isRetryableError(err: unknown): boolean {
@@ -372,36 +449,70 @@ export class GeminiProvider implements TranslationProvider {
           );
         }
 
-        let suspects = detectLeaks(
+        const suspects = detectLeaks(
           entries,
           parsed.entries,
           targetLang,
           parsed.filledFromOther
         );
-        if (suspects.length === 0) return parsed.entries;
+        // Only `fail` suspects earn a second API call. A `warn` is by
+        // definition a usable value, and re-rolling the whole chunk for one
+        // used to cost a request and could come back with fewer keys.
+        const fatal = suspects.filter((s) => s.severity === "fail");
+        if (fatal.length === 0) {
+          if (suspects.length > 0) {
+            console.log(
+              `\n    ⚠ ${suspects.length} imperfect value(s) in ${targetLang}, kept: ${describeSuspects(suspects)}`
+            );
+          }
+          return applySuspects(entries, parsed, suspects);
+        }
 
         // One corrective retry naming exactly what was wrong (CEL-1539).
         console.log(
-          `\n    ⚠ ${suspects.length} suspicious value(s) in ${targetLang} — retrying: ${describeSuspects(suspects)}`
+          `\n    ⚠ ${fatal.length} suspicious value(s) in ${targetLang} — retrying: ${describeSuspects(fatal)}`
         );
-        const corrective =
-          prompt + buildCorrectiveInstruction(suspects, langName);
-        const retried = parseGeminiResponse(await generate(corrective, 0), entries);
-        suspects = detectLeaks(
+        const corrective = prompt + buildCorrectiveInstruction(fatal, langName);
+
+        let retried: ParsedResponse | null = null;
+        try {
+          retried = parseGeminiResponse(await generate(corrective, 0), entries);
+        } catch {
+          // A malformed corrective retry must not throw out of the guard: that
+          // routes into the chunk-failure path, which knows nothing about the
+          // suspects and would write English. Keep the first pass instead.
+          retried = null;
+        }
+        if (retried === null) return applySuspects(entries, parsed, suspects);
+
+        const retrySuspects = detectLeaks(
           entries,
           retried.entries,
           targetLang,
           retried.filledFromOther
         );
-        if (suspects.length === 0) return retried.entries;
+        const merged = mergeCorrectiveRetry(
+          parsed,
+          retried,
+          new Set(fatal.map((s) => s.key)),
+          new Set(retrySuspects.filter((s) => s.severity === "fail").map((s) => s.key))
+        );
 
-        const fatal = suspects.filter((s) => s.severity === "fail");
-        if (fatal.length > 0) {
+        const finalSuspects = detectLeaks(
+          entries,
+          merged.entries,
+          targetLang,
+          merged.filledFromOther
+        );
+        if (finalSuspects.length === 0) return merged.entries;
+
+        const blocked = finalSuspects.filter((s) => s.disposition === "block");
+        if (blocked.length > 0) {
           console.log(
-            `    ✗ ${fatal.length} value(s) still unusable after retry — failing those keys: ${describeSuspects(fatal)}`
+            `    ✗ ${blocked.length} value(s) still unusable after retry — failing those keys: ${describeSuspects(blocked)}`
           );
         }
-        return markFailed(entries, retried, suspects);
+        return applySuspects(entries, merged, finalSuspects);
       } catch (err) {
         if (isRetryableError(err) && attempt < MAX_RETRIES) {
           const delay = RETRY_BASE_DELAY_MS * Math.pow(2, attempt - 1);
