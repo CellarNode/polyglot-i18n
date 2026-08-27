@@ -1,5 +1,6 @@
 import { GoogleGenAI } from "@google/genai";
 import type { TranslationProvider, TranslationEntry } from "./types.js";
+import { sourceFormFor } from "../plurals.js";
 
 const LANGUAGE_NAMES: Record<string, string> = {
   en: "English",
@@ -45,6 +46,9 @@ Rules:
 - Translate from English to the target language
 - Preserve ALL placeholders exactly: {{variable}}, {{count}}, {0}, %s, %d
 - Preserve ALL i18next plural suffixes in keys (_one, _other, _zero, _few, _many)
+- When a "Plural forms required" section is present, return EVERY key it lists —
+  including plural categories English does not have. Write each form with the
+  grammatical number the target language actually uses; never copy English.
 - Preserve HTML tags if present: <strong>, <br/>, <a>, etc.
 - Keep translations concise — UI strings must fit buttons, labels, menus
 - Use formal register unless the source is clearly informal
@@ -65,11 +69,41 @@ export function buildPrompt(
 ): string {
   const langName = LANGUAGE_NAMES[targetLang] ?? targetLang;
   const json: Record<string, string> = {};
-  for (const e of entries) json[e.key] = e.value;
+  const pluralRequirements: string[] = [];
+
+  for (const e of entries) {
+    if (!e.plural) {
+      json[e.key] = e.value;
+      continue;
+    }
+
+    // Send every English form of the group so the model has the full picture.
+    for (const [category, value] of Object.entries(e.plural.sourceForms)) {
+      json[`${e.plural.base}_${category}`] = value;
+    }
+
+    const missing = e.plural.targetCategories.filter(
+      (category) => !(category in e.plural!.sourceForms)
+    );
+    if (missing.length > 0) {
+      const required = e.plural.targetCategories
+        .map((category) => `${e.plural!.base}_${category}`)
+        .join(", ");
+      pluralRequirements.push(`- ${required}`);
+    }
+  }
 
   let prompt = `Translate this JSON from English to ${langName} (${targetLang}).\n`;
   if (context) prompt += `Context: ${context}\n`;
   prompt += `\n${JSON.stringify(json, null, 2)}`;
+
+  if (pluralRequirements.length > 0) {
+    prompt +=
+      `\n\nPlural forms required: ${langName} uses plural categories English does not.\n` +
+      `Return these keys in the JSON, adding the forms that are missing above:\n` +
+      `${pluralRequirements.join("\n")}`;
+  }
+
   return prompt;
 }
 
@@ -84,10 +118,30 @@ export function parseGeminiResponse(
 
   const parsed = JSON.parse(cleaned) as Record<string, string>;
 
-  return sourceEntries.map((entry) => ({
-    key: entry.key,
-    value: parsed[entry.key] ?? entry.value,
-  }));
+  const result: TranslationEntry[] = [];
+  for (const entry of sourceEntries) {
+    if (!entry.plural) {
+      result.push({ key: entry.key, value: parsed[entry.key] ?? entry.value });
+      continue;
+    }
+
+    // Accept the expanded key set: one key per category the target needs,
+    // not just the categories the English source happened to carry.
+    const { base, targetCategories } = entry.plural;
+    for (const category of targetCategories) {
+      const key = `${base}_${category}`;
+      result.push({
+        key,
+        value:
+          parsed[key] ??
+          parsed[`${base}_other`] ??
+          sourceFormFor(entry.plural, category) ??
+          entry.value,
+      });
+    }
+  }
+
+  return result;
 }
 
 function isRetryableError(err: unknown): boolean {
@@ -128,6 +182,7 @@ function formatError(err: unknown): string {
 
 export class GeminiProvider implements TranslationProvider {
   name = "gemini";
+  supportsPluralExpansion = true;
   private client: GoogleGenAI;
   private model: string;
 

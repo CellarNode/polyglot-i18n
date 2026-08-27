@@ -15,6 +15,38 @@ function createMockProvider(): TranslationProvider {
   };
 }
 
+/**
+ * Stands in for Gemini: honours `TranslationEntry.plural` by returning one
+ * entry per target category, exactly as `parseGeminiResponse` does.
+ */
+function createPluralAwareProvider(): TranslationProvider {
+  return {
+    name: "mock-plural",
+    supportsPluralExpansion: true,
+    translate: vi.fn(async (entries: TranslationEntry[], lang: string) => {
+      const out: TranslationEntry[] = [];
+      for (const e of entries) {
+        if (!e.plural) {
+          out.push({ key: e.key, value: `[${lang}] ${e.value}` });
+          continue;
+        }
+        for (const category of e.plural.targetCategories) {
+          out.push({
+            key: `${e.plural.base}_${category}`,
+            value: `[${lang}:${category}] ${e.plural.sourceForms[category] ?? e.plural.sourceForms.other}`,
+          });
+        }
+      }
+      return out;
+    }),
+  };
+}
+
+const RU_SOURCE = {
+  "item_one": "{{count}} item",
+  "item_other": "{{count}} items",
+};
+
 describe("translateNamespace", () => {
   it("translates all keys when no target exists", async () => {
     const provider = createMockProvider();
@@ -92,5 +124,170 @@ describe("translateNamespace", () => {
 
     expect(result.translated).toBe(1);
     expect(result.skipped).toBe(0);
+  });
+});
+
+describe("translateNamespace — non-English plural categories (CEL-1267)", () => {
+  it("emits Russian's four plural categories from a two-category English source", async () => {
+    const provider = createPluralAwareProvider();
+
+    const result = await translateNamespace({
+      sourceFlat: RU_SOURCE,
+      targetFlat: {},
+      cacheEntries: {},
+      provider,
+      targetLang: "ru",
+      force: false,
+    });
+
+    expect(Object.keys(result.output).sort()).toEqual([
+      "item_few",
+      "item_many",
+      "item_one",
+      "item_other",
+    ]);
+    // The written file carries all four, in canonical CLDR order.
+    expect(result.outputKeyOrder).toEqual([
+      "item_one",
+      "item_few",
+      "item_many",
+      "item_other",
+    ]);
+    expect(result.output.item_few).toBe("[ru:few] {{count}} items");
+  });
+
+  it("hands the provider one entry carrying the whole plural group", async () => {
+    const provider = createPluralAwareProvider();
+
+    await translateNamespace({
+      sourceFlat: RU_SOURCE,
+      targetFlat: {},
+      cacheEntries: {},
+      provider,
+      targetLang: "pl",
+      force: false,
+    });
+
+    expect(provider.translate).toHaveBeenCalledOnce();
+    const sent = vi.mocked(provider.translate).mock.calls[0][0];
+    expect(sent).toHaveLength(1);
+    expect(sent[0].key).toBe("item_other");
+    expect(sent[0].plural).toEqual({
+      base: "item",
+      sourceForms: { one: "{{count}} item", other: "{{count}} items" },
+      targetCategories: ["one", "few", "many", "other"],
+    });
+  });
+
+  it("regenerates a group whose target file predates plural expansion", async () => {
+    const provider = createPluralAwareProvider();
+    // English unchanged and cached, but the ru file only has one/other.
+    const result = await translateNamespace({
+      sourceFlat: RU_SOURCE,
+      targetFlat: { item_one: "товар", item_other: "товаров" },
+      cacheEntries: {
+        item_one: hashValue(RU_SOURCE.item_one),
+        item_other: hashValue(RU_SOURCE.item_other),
+      },
+      provider,
+      targetLang: "ru",
+      force: false,
+    });
+
+    expect(provider.translate).toHaveBeenCalledOnce();
+    expect(result.output).toHaveProperty("item_few");
+    expect(result.output).toHaveProperty("item_many");
+    expect(result.skipped).toBe(0);
+  });
+
+  it("preserves target-only categories when nothing needs retranslating", async () => {
+    const provider = createPluralAwareProvider();
+    const result = await translateNamespace({
+      sourceFlat: RU_SOURCE,
+      targetFlat: {
+        item_one: "товар",
+        item_few: "товара",
+        item_many: "товаров",
+        item_other: "товара",
+      },
+      cacheEntries: {
+        item_one: hashValue(RU_SOURCE.item_one),
+        item_other: hashValue(RU_SOURCE.item_other),
+      },
+      provider,
+      targetLang: "ru",
+      force: false,
+    });
+
+    expect(provider.translate).not.toHaveBeenCalled();
+    // _few / _many have no English source key — they must survive the run.
+    expect(result.output.item_few).toBe("товара");
+    expect(result.output.item_many).toBe("товаров");
+  });
+
+  it("falls back to English forms for every category when a chunk fails", async () => {
+    const provider: TranslationProvider = {
+      name: "exploding",
+      supportsPluralExpansion: true,
+      translate: vi.fn(async () => {
+        throw new Error("boom");
+      }),
+    };
+
+    const result = await translateNamespace({
+      sourceFlat: RU_SOURCE,
+      targetFlat: {},
+      cacheEntries: {},
+      provider,
+      targetLang: "ru",
+      force: false,
+    });
+
+    expect(result.errors).toHaveLength(1);
+    expect(Object.keys(result.output).sort()).toEqual([
+      "item_few",
+      "item_many",
+      "item_one",
+      "item_other",
+    ]);
+    expect(result.output.item_many).toBe("{{count}} items");
+  });
+
+  it("leaves providers without plural support on the flat English key set", async () => {
+    // DeepL shape: no supportsPluralExpansion flag.
+    const provider = createMockProvider();
+
+    const result = await translateNamespace({
+      sourceFlat: RU_SOURCE,
+      targetFlat: {},
+      cacheEntries: {},
+      provider,
+      targetLang: "ru",
+      force: false,
+    });
+
+    const sent = vi.mocked(provider.translate).mock.calls[0][0];
+    expect(sent.map((e) => e.key)).toEqual(["item_one", "item_other"]);
+    expect(sent.every((e) => e.plural === undefined)).toBe(true);
+    expect(result.outputKeyOrder).toEqual(["item_one", "item_other"]);
+    expect(Object.keys(result.output).sort()).toEqual([
+      "item_one",
+      "item_other",
+    ]);
+  });
+
+  it("does not expand a suffixed key that is not a plural group", async () => {
+    const provider = createPluralAwareProvider();
+    const result = await translateNamespace({
+      sourceFlat: { step_one: "Step one" },
+      targetFlat: {},
+      cacheEntries: {},
+      provider,
+      targetLang: "ru",
+      force: false,
+    });
+
+    expect(result.outputKeyOrder).toEqual(["step_one"]);
+    expect(result.output).toEqual({ step_one: "[ru] Step one" });
   });
 });

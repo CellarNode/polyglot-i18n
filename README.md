@@ -8,7 +8,8 @@ Drop-in replacement for locize, Crowdin, and Phrase — zero recurring SaaS cost
 
 - **Two providers:** Google Gemini (AI, cheap) and DeepL (professional quality)
 - **Incremental:** Only translates missing or changed keys — won't overwrite manual edits
-- **Preserves:** `{{variables}}`, nested JSON, plurals (`_one`/`_other`), HTML tags
+- **Preserves:** `{{variables}}`, nested JSON, HTML tags
+- **Plural-aware:** Generates each language's own CLDR plural categories — Russian and Polish get `_one`/`_few`/`_many`/`_other` from an English `_one`/`_other` source
 - **Two modes:** Namespaced directories (`en/common.json`) or flat files (`en.json`)
 - **GitHub Action:** Auto-creates a PR with translated files
 - **Dry run:** Preview what would be translated before running
@@ -120,6 +121,49 @@ polyglot-i18n tracks which English strings have been translated via a `.polyglot
 
 Use `--force` to retranslate everything regardless of cache state.
 
+## Plural Categories
+
+English has two plural categories (`one`, `other`). Many languages have more — Russian, Polish
+and Czech need `one`, `few`, `many` and `other`, and Arabic needs all six. A target file that
+only mirrors the English key set therefore cannot express those languages correctly: i18next
+falls back to `_other`, so counts like 2, 3 and 4 render the wrong form.
+
+polyglot-i18n resolves each target language's categories with `Intl.PluralRules` and asks the
+model for the full set:
+
+```jsonc
+// locales/en/common.json
+{
+  "item_one": "{{count}} item",
+  "item_other": "{{count}} items"
+}
+```
+
+```jsonc
+// locales/ru/common.json — four categories from a two-category source
+{
+  "item_one": "{{count}} товар",
+  "item_few": "{{count}} товара",
+  "item_many": "{{count}} товаров",
+  "item_other": "{{count}} товара"
+}
+```
+
+Details worth knowing:
+
+- **Detection is conservative.** A key only counts as a plural when its base has an `_other`
+  variant, which i18next requires. A lone `step_one` ("Step one") is left alone.
+- **Categories are never removed.** The emitted set is the union of the English categories and
+  the target's own, so a language with fewer categories than English (`zh`, `ja`) keeps its
+  existing translations.
+- **Existing locales upgrade themselves.** A target file missing a category its language needs
+  is regenerated on the next run even when the English source is unchanged — no `--force`.
+- **The cache stays keyed on English.** `.polyglot-cache.json` tracks the English source keys;
+  the extra target-only forms are carried over untouched between runs.
+- **Ordinals are handled too** — an i18next `_ordinal_*` key resolves against ordinal rules.
+- **Gemini only.** DeepL translates strings, not key sets, so the DeepL provider keeps writing
+  the flat English key set.
+
 ## Providers
 
 ### Google Gemini
@@ -131,6 +175,9 @@ Default model: `gemini-3.1-flash-lite-preview`. Override with `--model`.
 ### DeepL
 
 Set `DEEPL_API_KEY` env var or pass `--api-key`. Free and Pro tiers auto-detected from the key format (free keys end in `:fx`).
+
+DeepL translates strings rather than key sets, so it writes the flat English key set — see
+[Plural Categories](#plural-categories).
 
 ```bash
 polyglot-i18n translate -i ./locales/en -o sv,fr,de -p deepl
