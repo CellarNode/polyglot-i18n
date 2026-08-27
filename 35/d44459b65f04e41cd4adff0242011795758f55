@@ -1,0 +1,22 @@
+README.md
+  s_b307391c251243::t_8296ca7f7a4920 159-162,165
+  s_b307391c251243::t_6f542bb7e7074a 329-332
+AGENTS.md
+  s_b307391c251243::t_5c1f8f70693738 92-97
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "35d44459b65f04e41cd4adff0242011795758f55",
+  "prompts": {},
+  "sessions": {
+    "s_b307391c251243": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "8c2f8e8a-6a3a-4ebf-a791-70c464da37fe",
+        "model": "claude-fable-5"
+      },
+      "human_author": "mjnong <marcusnagy@icloud.com>"
+    }
+  }
+}
