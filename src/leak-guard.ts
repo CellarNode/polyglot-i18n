@@ -37,11 +37,22 @@ export type LeakReason =
 /**
  * What happens to a value that is still suspect after the corrective retry.
  *
- * `block` is the only disposition that can lose a value, so it is reserved for
- * shapes that are unambiguously wrong. A byte-identical value is never blocked:
- * filenames (`qr-labels-{{count}}.zip`), slugs and brand-only strings
- * (`Systembolaget`, `TanStack Query`) are identical by necessity, and failing
- * them would exit the CLI non-zero on every run with no way to satisfy it.
+ * `block` is the only disposition that can lose a value — it is what turns the
+ * CLI non-zero — so it is RESERVED for values that demonstrably carry
+ * source-language text: an English token spliced into an otherwise-translated
+ * value, or no value at all. Nothing else may block.
+ *
+ * In particular a byte-identical value is never blocked (filenames like
+ * `qr-labels-{{count}}.zip`, slugs and brand-only strings are identical by
+ * necessity), and neither is a uniform plural group: "{{count}} мл" repeated
+ * across all four Russian categories is correct Russian, and blocking it makes
+ * the job permanently red with no way to satisfy it.
+ *
+ * `prefer-previous` is the degrade path for everything else: keep the previous
+ * translation when the target file has one, otherwise write the value with a
+ * warning — and in BOTH cases leave the key out of the cache so the next run
+ * tries again. Silent-and-cached is the one outcome this module must never
+ * produce.
  */
 export type LeakDisposition =
   /** Never write the value: keep the previous translation, or omit the key. */
@@ -99,6 +110,14 @@ const VERBATIM_PATTERNS = [
 function stripVerbatim(text: string): string {
   let out = text;
   for (const pattern of VERBATIM_PATTERNS) out = out.replace(pattern, " ");
+  return out;
+}
+
+/** As `stripVerbatim`, but without leaving a space behind — used only to ask
+ * whether what remains is a single unbroken identifier. */
+function stripVerbatimTight(text: string): string {
+  let out = text;
+  for (const pattern of VERBATIM_PATTERNS) out = out.replace(pattern, "");
   return out;
 }
 
@@ -237,6 +256,41 @@ export function findSourceEchoTokens(
   return leaked;
 }
 
+/**
+ * A source that survives translation unchanged BY NECESSITY: a filename, slug,
+ * path or bare identifier. Recognised structurally — one unbroken token once
+ * placeholders are removed, carrying a separator (`.`, `_`, `/`) or an internal
+ * hyphen. `qr-labels-{{count}}.zip` qualifies; `Save` does not.
+ */
+function isIdentifierShaped(source: string): boolean {
+  const tight = stripVerbatimTight(source).trim();
+  if (tight === "" || /\s/.test(tight)) return false;
+  return /[._/]|[A-Za-z]-[A-Za-z]/.test(tight);
+}
+
+/**
+ * True when `source` contains English a translator was supposed to render —
+ * i.e. at least one word that is neither a placeholder, nor brand-spelled, nor
+ * a proper-noun occurrence, in a string that is not itself an identifier.
+ *
+ * Deliberately NOT vocabulary-driven. `TRANSLATABLE_WORDS` is an allow-list for
+ * blaming an individual word inside an otherwise-translated value; using it to
+ * decide whether a byte-identical value is suspect made every English string
+ * outside the list invisible (`Producer dashboard`, `Vintage`, `Certificate`),
+ * which is the CEL-1539 pass-through this module exists to stop.
+ */
+function hasOrdinaryEnglishContent(source: string): boolean {
+  if (isIdentifierShaped(source)) return false;
+  const stripped = stripVerbatim(source);
+  for (const match of stripped.matchAll(WORD_RE)) {
+    // Same floor as `findSourceEchoTokens`: one- and two-letter fragments are
+    // abbreviation debris ("e.g.,"), not words a translator renders.
+    if (match[0].length < 3) continue;
+    if (!isProperNounOccurrence(stripped, match[0], match.index)) return true;
+  }
+  return false;
+}
+
 /** The key set a request entry is expected to produce. */
 export function expectedKeys(entry: TranslationEntry): string[] {
   if (!entry.plural) return [entry.key];
@@ -263,21 +317,43 @@ function checkValue(
   if (!usesNonLatinScript(targetLang)) return null;
 
   const leaked = findSourceEchoTokens(sourceText, value);
-  if (leaked.length === 0) return null;
-
   const quoted = leaked.map((t) => `"${t}"`).join(", ");
-  // A value that IS the source is retried, but never blocked: it is the shape
+
+  // IDENTITY IS CHECKED FIRST, AND INDEPENDENTLY OF `TRANSLATABLE_WORDS`.
+  //
+  // The vocabulary list used to gate this branch, so a byte-identical value
+  // whose words are not on the list ("Producer dashboard", "Vintage",
+  // "Certificate") raised no suspect at all: it was written to the locale file
+  // AND cached as translated, so no future run ever retried it — the exact
+  // 0.3.0 shape this module exists to stop (review round 2, P1a).
+  //
+  // A value that IS the source is retried, but NEVER blocked: it is the shape
   // both a genuine leak and a legitimately-untranslatable string take, and only
   // the previous translation can tell them apart.
   if (value.trim() === sourceText.trim()) {
+    // Nothing a translator could have rendered — `TanStack Query`,
+    // `qr-labels-{{count}}.zip`. Identical is the only correct answer.
+    if (leaked.length === 0 && !hasOrdinaryEnglishContent(sourceText)) {
+      return null;
+    }
     return {
       key,
       reason: "identical-to-source",
-      detail: `value is the English source verbatim (${quoted})`,
-      severity: "fail",
+      detail:
+        leaked.length > 0
+          ? `value is the English source verbatim (${quoted})`
+          : "value is the English source verbatim",
+      // Corroborated by ordinary UI vocabulary → worth the one corrective
+      // retry. Uncorroborated → the words may be domain terms or a brand the
+      // heuristics cannot recognise, so re-rolling a whole chunk is not worth
+      // an API call. Either way the value degrades: warned, and left out of the
+      // cache so the next run tries again.
+      severity: leaked.length > 0 ? "fail" : "warn",
       disposition: "prefer-previous",
     };
   }
+
+  if (leaked.length === 0) return null;
   return {
     key,
     reason: "source-echo",
@@ -327,6 +403,12 @@ export function detectLeaks(
       pluralTypeForBase(base)
     );
 
+    // Keys this group already reported per value. The uniform-plural check below
+    // must not report them a second time: a filename plural group would emit
+    // both `identical-to-source` (prefer-previous) and `uniform-plural` for the
+    // same key, and `applySuspects` lets the harsher disposition win.
+    const alreadyReported = new Set<string>();
+
     for (const category of targetCategories) {
       const key = `${base}_${category}`;
       const suspect = checkValue(
@@ -337,6 +419,7 @@ export function detectLeaks(
       );
       if (suspect) {
         suspects.push(suspect);
+        alreadyReported.add(key);
         continue;
       }
       // A category the language genuinely uses must come from the model, not
@@ -352,6 +435,7 @@ export function detectLeaks(
           severity: "warn",
           disposition: "accept",
         });
+        alreadyReported.add(key);
       }
     }
 
@@ -369,12 +453,22 @@ export function detectLeaks(
     if (!countSensitive) continue;
 
     for (const category of targetCategories) {
+      const key = `${base}_${category}`;
+      if (alreadyReported.has(key)) continue;
       suspects.push({
-        key: `${base}_${category}`,
+        key,
         reason: "uniform-plural",
         detail: `all ${targetCategories.length} plural categories are byte-identical, but ${targetLang} has ${langCategories.length} distinct CLDR categories and the English source is count-sensitive`,
+        // Worth the one corrective retry — "differentiate the categories" is a
+        // correction the model can act on. But NOT a block: uniformity on its
+        // own is not evidence of source-language text, and plenty of correct
+        // answers are uniform ("{{count}} мл" — Russian unit abbreviations do
+        // not inflect; a filename; an invariant code). Blocking those failed
+        // the CLI on every run with no answer that could satisfy it (review
+        // round 2, P1b). Real leakage is caught by `checkValue` above, where
+        // `block` belongs.
         severity: "fail",
-        disposition: "block",
+        disposition: "prefer-previous",
       });
     }
   }

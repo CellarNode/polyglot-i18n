@@ -22,6 +22,7 @@ vi.mock("@google/genai", () => ({
 }));
 
 const { GeminiProvider } = await import("../../providers/gemini.js");
+const { translateNamespace } = await import("../../translate.js");
 import type { TranslationEntry } from "../../providers/types.js";
 
 /** Queues raw model responses, one per `generateContent` call. */
@@ -212,7 +213,7 @@ describe("GeminiProvider.translate — byte-identical values", () => {
     expect(entry.value).toBe("Product");
   });
 
-  it("leaves a brand-only identical value completely alone", async () => {
+  it("warns about a brand-only identical value without re-rolling the chunk", async () => {
     respondWith(JSON.stringify({ retailer: "Systembolaget" }));
 
     const result = await provider().translate(
@@ -220,8 +221,89 @@ describe("GeminiProvider.translate — byte-identical values", () => {
       "zh"
     );
 
+    // A single Titlecase word at a sentence start carries no proper-noun
+    // signal, so the guard cannot know this is a retailer rather than English.
+    // It says so instead of guessing — but it is a `warn`, so it costs no
+    // second API call, and `prefer-previous`, so it never fails the CLI.
     expect(generateContent).toHaveBeenCalledTimes(1);
-    expect(result).toEqual([{ key: "retailer", value: "Systembolaget" }]);
+    expect(result).toEqual([
+      {
+        key: "retailer",
+        value: "Systembolaget",
+        degraded: {
+          reason: "identical-to-source",
+          detail: "value is the English source verbatim",
+        },
+      },
+    ]);
+    expect(result[0].failed).toBeUndefined();
+  });
+});
+
+/**
+ * The whole chain, end to end: `GeminiProvider` → `detectLeaks` →
+ * `applySuspects` → `translateNamespace` → the cache it writes back.
+ *
+ * This is the assertion the round-2 guard could not make. A byte-identical
+ * value whose words are outside `TRANSLATABLE_WORDS` was written to the locale
+ * file AND cached, so the next run skipped it forever (review round 3, P1a).
+ */
+describe("byte-identical output reaches the cache decision", () => {
+  it("writes a byte-identical correct value, warns, and does NOT cache it", async () => {
+    respondWith(JSON.stringify({ "brand.retailer": "Systembolaget" }));
+
+    const result = await translateNamespace({
+      sourceFlat: { "brand.retailer": "Systembolaget" },
+      targetFlat: {},
+      cacheEntries: {},
+      provider: provider(),
+      targetLang: "zh",
+      force: false,
+    });
+
+    // Correct value, kept.
+    expect(result.output["brand.retailer"]).toBe("Systembolaget");
+    // Never a failure — the CLI exits non-zero on `failed > 0`.
+    expect(result.failed).toBe(0);
+    expect(result.errors).toEqual([]);
+    // Not silent.
+    expect(result.warnings.join("\n")).toContain("identical-to-source");
+    // Not cached: the next run asks again instead of skipping it forever.
+    expect("brand.retailer" in result.newCacheEntries).toBe(false);
+  });
+
+  it("does the same for English the vocabulary list cannot see", async () => {
+    respondWith(JSON.stringify({ "nav.overview": "Producer dashboard" }));
+
+    const result = await translateNamespace({
+      sourceFlat: { "nav.overview": "Producer dashboard" },
+      targetFlat: {},
+      cacheEntries: {},
+      provider: provider(),
+      targetLang: "zh",
+      force: false,
+    });
+
+    expect(result.failed).toBe(0);
+    expect(result.warnings.join("\n")).toContain("identical-to-source");
+    expect("nav.overview" in result.newCacheEntries).toBe(false);
+  });
+
+  it("keeps the previous translation over the identical value when there is one", async () => {
+    respondWith(JSON.stringify({ "nav.overview": "Producer dashboard" }));
+
+    const result = await translateNamespace({
+      sourceFlat: { "nav.overview": "Producer dashboard" },
+      targetFlat: { "nav.overview": "生产商仪表板" },
+      cacheEntries: {},
+      provider: provider(),
+      targetLang: "zh",
+      force: true,
+    });
+
+    expect(result.output["nav.overview"]).toBe("生产商仪表板");
+    expect(result.failed).toBe(0);
+    expect("nav.overview" in result.newCacheEntries).toBe(false);
   });
 });
 
@@ -243,7 +325,7 @@ describe("GeminiProvider.translate — missing and uniform values", () => {
     expect(map.cancel.failed).toMatchObject({ reason: "no-target-form" });
   });
 
-  it("fails a ru plural group whose categories came back byte-identical", async () => {
+  it("degrades — never fails — a ru plural group that came back byte-identical", async () => {
     const uniform = JSON.stringify({
       item_one: "{{count}} товара",
       item_few: "{{count}} товара",
@@ -254,10 +336,41 @@ describe("GeminiProvider.translate — missing and uniform values", () => {
 
     const result = await provider().translate([RU_ITEM], "ru");
 
+    // Still worth the one corrective retry — "differentiate the categories" is
+    // an instruction the model can act on.
     expect(generateContent).toHaveBeenCalledTimes(2);
     expect(result).toHaveLength(4);
+    expect(result.every((e) => e.failed === undefined)).toBe(true);
     expect(
-      result.every((e) => e.failed?.reason === "uniform-plural")
+      result.every((e) => e.degraded?.reason === "uniform-plural")
     ).toBe(true);
+  });
+
+  it("keeps a uniform ru group out of the cache without failing the run", async () => {
+    // "{{count}} мл" is correct Russian for all four categories — unit
+    // abbreviations do not inflect — so no retry can produce anything else.
+    // Blocking it exited the CLI non-zero on every run, forever.
+    const uniform = JSON.stringify({
+      "volume.ml_one": "{{count}} мл",
+      "volume.ml_few": "{{count}} мл",
+      "volume.ml_many": "{{count}} мл",
+      "volume.ml_other": "{{count}} мл",
+    });
+    respondWith(uniform, uniform);
+
+    const result = await translateNamespace({
+      sourceFlat: { "volume.ml_other": "{{count}} ml" },
+      targetFlat: {},
+      cacheEntries: {},
+      provider: provider(),
+      targetLang: "ru",
+      force: false,
+    });
+
+    expect(result.failed).toBe(0);
+    expect(result.errors).toEqual([]);
+    expect(result.output["volume.ml_many"]).toBe("{{count}} мл");
+    expect(result.warnings.join("\n")).toContain("uniform-plural");
+    expect(Object.keys(result.newCacheEntries)).toEqual([]);
   });
 });

@@ -278,7 +278,10 @@ describe("detectLeaks — plural under-differentiation (CEL-1539)", () => {
     ]);
     expect(suspects.every((s) => s.reason === "uniform-plural")).toBe(true);
     expect(suspects.every((s) => s.severity === "fail")).toBe(true);
-    expect(suspects.every((s) => s.disposition === "block")).toBe(true);
+    // Retried once, never blocked: uniformity alone is not evidence of English.
+    expect(suspects.every((s) => s.disposition === "prefer-previous")).toBe(
+      true
+    );
   });
 
   it("flags a ru group whose English source is only `_other` but count-sensitive", () => {
@@ -465,5 +468,218 @@ describe("severity and disposition are independent", () => {
       new Set(["item_many"])
     );
     expect(suspects.filter((s) => s.severity === "fail")).toEqual([]);
+  });
+});
+
+/**
+ * Review round 3, P1a.
+ *
+ * `TRANSLATABLE_WORDS` used to gate the identity check, so a byte-identical
+ * English value made of words outside that list raised NO suspect: it was
+ * written to the locale file and cached as translated, and no future run ever
+ * retried it. Silent-and-cached is the one outcome this module must never
+ * produce, so identity is now decided structurally and the vocabulary only
+ * chooses how loudly to complain.
+ */
+describe("identical-to-source is independent of the vocabulary list", () => {
+  /** Real CellarNode UI copy, none of it in `TRANSLATABLE_WORDS`. */
+  const DOMAIN_ENGLISH = [
+    "Producer dashboard",
+    "Importer",
+    "Distributor",
+    "Vintage",
+    "Winery",
+    "Vineyard",
+    "Grape variety",
+    "Region",
+    "Certificate",
+    "Compliance",
+    "Allergen",
+    "Ingredient",
+    "Nutrition",
+    "Shipment",
+    "Invoice",
+    "Warehouse",
+    "Inventory",
+    "Overview",
+    "Account",
+    "Contract",
+    "Terms",
+    "Policy",
+    "Plan",
+    "Team",
+    "Access",
+  ];
+
+  it("has no vocabulary signal for any of them — the anti-vacuity guard", () => {
+    // The table below would pass for the wrong reason if these words were
+    // simply added to the list, so pin the premise: the echo detector is blind
+    // to every one of them, and the table still catches them.
+    for (const source of DOMAIN_ENGLISH) {
+      expect(findSourceEchoTokens(source, source), source).toEqual([]);
+    }
+  });
+
+  it.each(DOMAIN_ENGLISH)(
+    "reports verbatim English %j that the vocabulary cannot see",
+    (source) => {
+      const suspects = detectLeaks(
+        entries({ k: source }),
+        entries({ k: source }),
+        "zh"
+      );
+
+      expect(suspects).toEqual([
+        expect.objectContaining({
+          key: "k",
+          reason: "identical-to-source",
+          // Uncorroborated, so it does not buy a second API call — but it is
+          // degraded, which is what keeps it out of the cache.
+          severity: "warn",
+          disposition: "prefer-previous",
+        }),
+      ]);
+    }
+  );
+
+  it("still earns the corrective retry when the vocabulary corroborates it", () => {
+    const suspects = detectLeaks(
+      entries({ save: "Save" }),
+      entries({ save: "Save" }),
+      "zh"
+    );
+    expect(suspects[0]).toMatchObject({
+      reason: "identical-to-source",
+      severity: "fail",
+      disposition: "prefer-previous",
+    });
+  });
+
+  it("stays silent for a source nothing could have translated", () => {
+    const silent = (source: string, lang = "zh") =>
+      detectLeaks(entries({ k: source }), entries({ k: source }), lang);
+
+    // A filename template and a slug: one unbroken identifier once the
+    // placeholder is removed.
+    expect(silent("qr-labels-{{count}}.zip")).toEqual([]);
+    expect(silent("cellarnode-admin")).toEqual([]);
+    // A brand plus a Titlecase proper noun away from a sentence start.
+    expect(silent("TanStack Query")).toEqual([]);
+    expect(silent("e.g., Pinot Noir")).toEqual([]);
+    // Nothing but a placeholder and an acronym.
+    expect(silent("{{count}} PDF")).toEqual([]);
+  });
+
+  it("never blocks a byte-identical value, listed word or not", () => {
+    for (const source of [...DOMAIN_ENGLISH, "Save", "Product options"]) {
+      const suspects = detectLeaks(
+        entries({ k: source }),
+        entries({ k: source }),
+        "ru"
+      );
+      expect(
+        suspects.filter((s) => s.disposition === "block"),
+        source
+      ).toEqual([]);
+    }
+  });
+});
+
+/**
+ * Review round 3, P1b.
+ *
+ * `block` is what turns the CLI non-zero and drops the key from the cache, so
+ * it is reserved for values that demonstrably carry source-language text.
+ * Uniformity across plural categories is not that: plenty of correct answers
+ * are uniform, and no retry can produce a different one.
+ */
+describe("uniform plural groups degrade instead of blocking", () => {
+  const RU_ML: TranslationEntry = {
+    key: "volume.ml_other",
+    value: "{{count}} ml",
+    plural: {
+      base: "volume.ml",
+      sourceForms: { other: "{{count}} ml" },
+      targetCategories: ["one", "few", "many", "other"],
+    },
+  };
+
+  it("never blocks a uniform ru group that is correct by necessity", () => {
+    // Russian unit abbreviations do not inflect: "{{count}} мл" is the right
+    // answer for all four categories. Blocking it failed the job on every run
+    // with no answer that could satisfy it.
+    const suspects = detectLeaks(
+      [RU_ML],
+      entries({
+        "volume.ml_one": "{{count}} мл",
+        "volume.ml_few": "{{count}} мл",
+        "volume.ml_many": "{{count}} мл",
+        "volume.ml_other": "{{count}} мл",
+      }),
+      "ru"
+    );
+
+    expect(suspects).toHaveLength(4);
+    expect(suspects.every((s) => s.reason === "uniform-plural")).toBe(true);
+    expect(suspects.every((s) => s.disposition === "prefer-previous")).toBe(
+      true
+    );
+    expect(suspects.filter((s) => s.disposition === "block")).toEqual([]);
+  });
+
+  it("never blocks a uniform group whose value is a filename", () => {
+    const zip: TranslationEntry = {
+      key: "bulkExport.filename_other",
+      value: "qr-labels-{{count}}.zip",
+      plural: {
+        base: "bulkExport.filename",
+        sourceForms: { other: "qr-labels-{{count}}.zip" },
+        targetCategories: ["one", "few", "many", "other"],
+      },
+    };
+
+    const suspects = detectLeaks(
+      [zip],
+      entries({
+        "bulkExport.filename_one": "qr-labels-{{count}}.zip",
+        "bulkExport.filename_few": "qr-labels-{{count}}.zip",
+        "bulkExport.filename_many": "qr-labels-{{count}}.zip",
+        "bulkExport.filename_other": "qr-labels-{{count}}.zip",
+      }),
+      "ru"
+    );
+
+    expect(suspects.filter((s) => s.disposition === "block")).toEqual([]);
+  });
+
+  it("still blocks a uniform group that really is echoing English", () => {
+    // The leak is caught per value, where `block` belongs — and the uniform
+    // check does not report the same keys a second time, which is how `block`
+    // used to beat `prefer-previous` on a filename group.
+    const labels: TranslationEntry = {
+      key: "download.labels_other",
+      value: "Download labels",
+      plural: {
+        base: "download.labels",
+        sourceForms: { one: "Download label", other: "Download labels" },
+        targetCategories: ["one", "few", "many", "other"],
+      },
+    };
+
+    const suspects = detectLeaks(
+      [labels],
+      entries({
+        "download.labels_one": "Download labels",
+        "download.labels_few": "Download labels",
+        "download.labels_many": "Download labels",
+        "download.labels_other": "Download labels",
+      }),
+      "ru"
+    );
+
+    expect(suspects).toHaveLength(4);
+    expect(new Set(suspects.map((s) => s.key)).size).toBe(4);
+    expect(suspects.some((s) => s.reason === "uniform-plural")).toBe(false);
+    expect(suspects.some((s) => s.disposition === "block")).toBe(true);
   });
 });

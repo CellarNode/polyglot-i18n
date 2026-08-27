@@ -23,6 +23,13 @@ import pairs from "./fixtures/shipped-locale-pairs.json" with { type: "json" };
  * untranslated English today — and prove the corpus is not passing simply
  * because the detector went silent.
  *
+ * Review round 3 narrowed exactly one guarantee. "Zero suspects" now holds for
+ * the clean pairs that were actually translated; the five byte-identical clean
+ * pairs are enumerated and pinned separately, because a byte-identical target
+ * is the one shape a leak and a correct value share, and the guard must not
+ * stay silent on it. "Never blocked" and "never retried" still hold for ALL of
+ * them, so no clean value can fail the CLI or cost an API call.
+ *
  * Regenerate with the locale files themselves; do not hand-edit the values.
  */
 
@@ -39,6 +46,9 @@ interface Pair {
 const corpus = pairs as Pair[];
 const clean = corpus.filter((p) => p.expect === "clean");
 const leaks = corpus.filter((p) => p.expect === "leak");
+const isIdentical = (p: Pair) => p.target.trim() === p.source.trim();
+const identical = clean.filter(isIdentical);
+const translated = clean.filter((p) => !isIdentical(p));
 const label = (p: Pair) => `${p.repo}/${p.lang}/${p.file} ${p.key}`;
 
 describe("regression corpus — shipped locale pairs", () => {
@@ -86,10 +96,33 @@ describe("regression corpus — shipped locale pairs", () => {
     expect(blocked).toEqual([]);
   });
 
-  it("raises no suspect at all for a correct shipped value", () => {
+  it("never spends a corrective retry on a correct shipped value", () => {
+    // `fail` severity is what buys a second API call. A clean value that earns
+    // one costs a request on every run of every job, forever.
+    const retried = clean
+      .map((p) => ({
+        at: label(p),
+        suspects: detectLeaks(
+          [{ key: p.key, value: p.source }],
+          [{ key: p.key, value: p.target }],
+          p.lang
+        ).filter((s) => s.severity === "fail"),
+      }))
+      .filter((r) => r.suspects.length > 0);
+
+    expect(retried).toEqual([]);
+  });
+
+  it("raises no suspect at all for a correct shipped value it could translate", () => {
     // Stronger than the two assertions above: a `warn`/`prefer-previous`
     // suspect is harmless to the file but still noise in every run's output.
-    const noisy = clean
+    //
+    // Scoped to the pairs whose target actually differs from the source. A
+    // byte-identical target is inherently ambiguous — it is what both a leak
+    // and an untranslatable string look like — and since review round 3 the
+    // guard reports it rather than staying silent. Those five are enumerated
+    // and pinned in the next test.
+    const noisy = translated
       .map((p) => ({
         at: label(p),
         suspects: detectLeaks(
@@ -101,6 +134,48 @@ describe("regression corpus — shipped locale pairs", () => {
       .filter((r) => r.suspects.length > 0);
 
     expect(noisy).toEqual([]);
+  });
+
+  it("pins which shipped values are byte-identical, and how loud each one is", () => {
+    // The exemption above is only safe while this bucket stays known. A new
+    // byte-identical pair must be classified here on purpose, not inherit the
+    // exemption silently.
+    expect(identical.map(label)).toEqual([
+      "producer-dashboard/zh/qr-labels.json bulkExport.filename",
+      "producer-dashboard/ru/qr-labels.json bulkExport.filename",
+      "producer-dashboard/zh/common.json devtools.tanstackQuery",
+      "producer-dashboard/ru/common.json devtools.tanstackQuery",
+      "producer-dashboard/ru/market.json listing.deliveryTermsIncoterm2020",
+    ]);
+
+    const suspectsFor = (p: Pair) =>
+      detectLeaks(
+        [{ key: p.key, value: p.source }],
+        [{ key: p.key, value: p.target }],
+        p.lang
+      );
+
+    // Structurally untranslatable — a filename template, and a brand followed
+    // by a Titlecase proper noun. Silence here is earned, not vocabulary luck.
+    for (const p of identical.filter((x) => x.key !== "listing.deliveryTermsIncoterm2020")) {
+      expect(suspectsFor(p), label(p)).toEqual([]);
+    }
+
+    // "Incoterm 2020" is a standard's name, but sentence-initial Titlecase
+    // carries no proper-noun signal, so it is indistinguishable from "Save".
+    // The guard says so out loud instead of guessing: a warn-level
+    // prefer-previous, which keeps the shipped value, never fails the CLI, and
+    // leaves the key out of the cache.
+    const incoterm = identical.find(
+      (p) => p.key === "listing.deliveryTermsIncoterm2020"
+    )!;
+    expect(suspectsFor(incoterm)).toEqual([
+      expect.objectContaining({
+        reason: "identical-to-source",
+        severity: "warn",
+        disposition: "prefer-previous",
+      }),
+    ]);
   });
 
   it("still catches the untranslated English that really did ship", () => {
