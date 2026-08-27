@@ -69,6 +69,7 @@ src/
 ├── cache.ts           # .polyglot-cache.json read/write
 ├── json-utils.ts      # Recursive JSON walking (preserves nesting)
 ├── placeholder.ts     # Protect {{variables}}, plurals (_one/_other), HTML tags
+├── plurals.ts         # CLDR plural groups + Intl.PluralRules category resolution
 ├── providers/         # gemini.ts, deepl.ts
 └── __tests__/
 
@@ -78,9 +79,18 @@ action.yml             # GitHub Action manifest
 ## What it preserves
 
 - `{{variables}}` interpolation
-- i18next plurals (`_one`, `_other`, `_zero`, `_few`, `_many`)
 - Nested JSON structure
 - HTML tags inside translation strings
+
+## Plural categories
+
+Target files are NOT a 1:1 mirror of the English key set. `src/plurals.ts` resolves each target
+language's CLDR categories via `Intl.PluralRules`, and the Gemini provider is asked for the full
+set — so `item_one`/`item_other` in English becomes `item_one`/`item_few`/`item_many`/`item_other`
+in Russian and Polish. The emitted set is the union of English's categories and the target's, so
+languages with fewer categories (zh, ja) never lose translations. Detection requires an `_other`
+sibling, which keeps incidental keys like `step_one` out of the expansion path. DeepL does not opt
+in (`TranslationProvider.supportsPluralExpansion`) and keeps the flat English key set.
 
 ## CRITICAL: do not run `instrument`
 

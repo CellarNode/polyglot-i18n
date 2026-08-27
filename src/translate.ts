@@ -11,6 +11,17 @@ import { flattenJSON, unflattenJSON } from "./json-utils.js";
 import { computeDiff, buildCacheEntries, type DiffResult } from "./cache.js";
 import { chunkEntries } from "./chunk.js";
 import { validatePlaceholders } from "./placeholder.js";
+import {
+  collectPluralGroups,
+  expandPluralFallback,
+  incompletePluralSourceKeys,
+  indexGroupsBySourceKey,
+  representativeKey,
+  sourceFormFor,
+  splitPluralKey,
+  toPluralExpansion,
+  type PluralGroup,
+} from "./plurals.js";
 import type {
   TranslationProvider,
   TranslationEntry,
@@ -48,6 +59,13 @@ export interface NamespaceResult {
   errors: string[];
   output: Record<string, string>;
   newCacheEntries: Record<string, string>;
+  /**
+   * Key order for the written file: English source order, with each plural
+   * group replaced by the full category set the target language needs. This is
+   * a superset of `Object.keys(sourceFlat)` — the target may carry plural
+   * categories English does not have.
+   */
+  outputKeyOrder: string[];
 }
 
 const CHUNK_SIZE = 30;
@@ -73,6 +91,36 @@ function elapsed(startMs: number): string {
 }
 
 /**
+ * English source order, with every plural group expanded to the categories the
+ * target language requires (the group's variants are emitted together at the
+ * position of its first source key).
+ */
+function buildOutputKeyOrder(
+  sourceFlat: Record<string, string>,
+  pluralGroups: Map<string, PluralGroup>
+): string[] {
+  const order: string[] = [];
+  const emittedBases = new Set<string>();
+
+  for (const key of Object.keys(sourceFlat)) {
+    const parts = splitPluralKey(key);
+    const group = parts ? pluralGroups.get(parts.base) : undefined;
+
+    if (!group) {
+      order.push(key);
+      continue;
+    }
+    if (emittedBases.has(group.base)) continue;
+    emittedBases.add(group.base);
+    for (const category of group.targetCategories) {
+      order.push(`${group.base}_${category}`);
+    }
+  }
+
+  return order;
+}
+
+/**
  * Translates a single namespace (flat key-value map) to one target language.
  */
 export async function translateNamespace(opts: {
@@ -94,6 +142,13 @@ export async function translateNamespace(opts: {
     context,
   } = opts;
 
+  // Only providers that opt in receive plural groups; everything else keeps
+  // the flat English key set exactly as before (DeepL path is untouched).
+  const pluralGroups = provider.supportsPluralExpansion
+    ? collectPluralGroups(sourceFlat, targetLang)
+    : new Map<string, PluralGroup>();
+  const groupBySourceKey = indexGroupsBySourceKey(pluralGroups);
+
   let keysToTranslate: string[];
   let diff: DiffResult;
 
@@ -103,6 +158,29 @@ export async function translateNamespace(opts: {
   } else {
     diff = computeDiff(sourceFlat, targetFlat, cacheEntries);
     keysToTranslate = [...diff.missing, ...diff.changed];
+
+    // A plural group whose target file is missing a category the language needs
+    // must be regenerated even when every English source key is unchanged —
+    // otherwise locales written before plural expansion never gain _few/_many.
+    const queued = new Set(keysToTranslate);
+    const incomplete = incompletePluralSourceKeys(
+      targetFlat,
+      pluralGroups
+    ).filter((key) => {
+      if (queued.has(key)) return false;
+      queued.add(key);
+      return true;
+    });
+
+    if (incomplete.length > 0) {
+      const incompleteSet = new Set(incomplete);
+      keysToTranslate = [...keysToTranslate, ...incomplete];
+      diff = {
+        missing: [...diff.missing, ...incomplete],
+        changed: diff.changed,
+        unchanged: diff.unchanged.filter((key) => !incompleteSet.has(key)),
+      };
+    }
   }
 
   const output: Record<string, string> = {};
@@ -115,6 +193,20 @@ export async function translateNamespace(opts: {
     output[key] = targetFlat[key];
   }
 
+  // Carry over target-locale-only plural variants (ru `_few`, `_many`, ...) for
+  // groups that are not being retranslated. They have no source key, so the
+  // loop above would silently drop them on the next run.
+  const retranslating = new Set(keysToTranslate);
+  for (const group of pluralGroups.values()) {
+    if (group.sourceKeys.some((key) => retranslating.has(key))) continue;
+    for (const category of group.targetCategories) {
+      const key = `${group.base}_${category}`;
+      if (key in targetFlat && !(key in output)) output[key] = targetFlat[key];
+    }
+  }
+
+  const outputKeyOrder = buildOutputKeyOrder(sourceFlat, pluralGroups);
+
   if (keysToTranslate.length === 0) {
     return {
       translated: 0,
@@ -125,14 +217,30 @@ export async function translateNamespace(opts: {
       errors: [],
       output,
       newCacheEntries: buildCacheEntries(sourceFlat),
+      outputKeyOrder,
     };
   }
 
-  // Build entries and chunk
-  const entries: TranslationEntry[] = keysToTranslate.map((key) => ({
-    key,
-    value: sourceFlat[key],
-  }));
+  // Build entries and chunk. A plural group collapses into ONE entry carrying
+  // the whole group, so the provider sees every English form together and its
+  // categories can never be split across chunks.
+  const entries: TranslationEntry[] = [];
+  const emittedBases = new Set<string>();
+  for (const key of keysToTranslate) {
+    const group = groupBySourceKey.get(key);
+    if (!group) {
+      entries.push({ key, value: sourceFlat[key] });
+      continue;
+    }
+    if (emittedBases.has(group.base)) continue;
+    emittedBases.add(group.base);
+    const repKey = representativeKey(group);
+    entries.push({
+      key: repKey,
+      value: sourceFlat[repKey],
+      plural: toPluralExpansion(group),
+    });
+  }
 
   const chunks = chunkEntries(entries, CHUNK_SIZE);
   const translatedEntries: TranslationEntry[] = [];
@@ -160,7 +268,7 @@ export async function translateNamespace(opts: {
 
       // On chunk failure, preserve source values so the file isn't missing keys
       for (const entry of chunk) {
-        translatedEntries.push({ key: entry.key, value: entry.value });
+        translatedEntries.push(...expandPluralFallback(entry));
       }
 
       console.log(
@@ -184,12 +292,9 @@ export async function translateNamespace(opts: {
   // Validate and merge
   for (const entry of translatedEntries) {
     output[entry.key] = entry.value;
-    const phWarnings = validatePlaceholders(
-      sourceFlat[entry.key],
-      entry.value,
-      entry.key
-    );
-    warnings.push(...phWarnings);
+    const source = resolveSourceValue(entry.key, sourceFlat, pluralGroups);
+    if (source === undefined) continue;
+    warnings.push(...validatePlaceholders(source, entry.value, entry.key));
   }
 
   const translatedCount = force
@@ -205,7 +310,26 @@ export async function translateNamespace(opts: {
     errors,
     output,
     newCacheEntries: buildCacheEntries(sourceFlat),
+    outputKeyOrder,
   };
+}
+
+/**
+ * English text a translated key should be validated against. Expanded plural
+ * categories have no source key of their own, so they fall back to the closest
+ * English form of their group.
+ */
+function resolveSourceValue(
+  key: string,
+  sourceFlat: Record<string, string>,
+  pluralGroups: Map<string, PluralGroup>
+): string | undefined {
+  if (key in sourceFlat) return sourceFlat[key];
+  const parts = splitPluralKey(key);
+  if (!parts) return undefined;
+  const group = pluralGroups.get(parts.base);
+  if (!group) return undefined;
+  return sourceFormFor(group, parts.category);
 }
 
 /**
@@ -312,14 +436,23 @@ export async function translate(
 
       if (dryRun) {
         const diff = computeDiff(sourceFlat, targetFlat, cacheEntries);
+        // Mirror translateNamespace: incomplete plural groups are work too.
+        const pluralGroups = provider.supportsPluralExpansion
+          ? collectPluralGroups(sourceFlat, lang)
+          : new Map<string, PluralGroup>();
+        const queued = new Set([...diff.missing, ...diff.changed]);
+        const incomplete = incompletePluralSourceKeys(
+          targetFlat,
+          pluralGroups
+        ).filter((key) => !queued.has(key));
         const toTranslate = force
           ? Object.keys(sourceFlat).length
-          : diff.missing.length + diff.changed.length;
+          : queued.size + incomplete.length;
         console.log(
-          `  [dry-run] ${sourceFile.name} → ${lang}: ${toTranslate} to translate, ${diff.unchanged.length} skipped`
+          `  [dry-run] ${sourceFile.name} → ${lang}: ${toTranslate} to translate, ${diff.unchanged.length - incomplete.length} skipped`
         );
         totalResult.translated += toTranslate;
-        totalResult.skipped += diff.unchanged.length;
+        totalResult.skipped += diff.unchanged.length - incomplete.length;
         continue;
       }
 
@@ -336,9 +469,11 @@ export async function translate(
         context,
       });
 
-      // Write output (preserve English key order)
+      // Write output. Follows English key order, but is NOT limited to the
+      // English key set: plural groups carry the target language's own CLDR
+      // categories, which can outnumber English's one/other.
       const orderedOutput: Record<string, string> = {};
-      for (const key of Object.keys(sourceFlat)) {
+      for (const key of result.outputKeyOrder) {
         if (key in result.output) orderedOutput[key] = result.output[key];
       }
 
