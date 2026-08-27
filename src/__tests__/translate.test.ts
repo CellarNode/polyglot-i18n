@@ -269,7 +269,16 @@ describe("translateNamespace — non-English plural categories (CEL-1267)", () =
     const sent = vi.mocked(provider.translate).mock.calls[0][0];
     expect(sent.map((e) => e.key)).toEqual(["item_one", "item_other"]);
     expect(sent.every((e) => e.plural === undefined)).toBe(true);
-    expect(result.outputKeyOrder).toEqual(["item_one", "item_other"]);
+    // The REQUEST is still flat. The key ORDER now reserves a slot for every
+    // category ru needs, because the target file may already hold them — but a
+    // slot with nothing behind it writes nothing, so a fresh target file comes
+    // out exactly as it did before (CEL-1533).
+    expect(result.outputKeyOrder).toEqual([
+      "item_one",
+      "item_few",
+      "item_many",
+      "item_other",
+    ]);
     expect(Object.keys(result.output).sort()).toEqual([
       "item_one",
       "item_other",
@@ -501,5 +510,161 @@ describe("degraded values (CEL-1539 review)", () => {
     });
 
     expect("card.beverage" in result.newCacheEntries).toBe(false);
+  });
+});
+
+/**
+ * CEL-1533 #3.
+ *
+ * Plural categories the TARGET language has but English does not (`_few`,
+ * `_many`) carry no source key. 0.3.1 collected plural groups only for a
+ * provider that could expand them, so running DeepL over a locale Gemini had
+ * expanded deleted every one of those keys from the file: the source keys came
+ * back translated, the target-only ones were never written, and the writer only
+ * emits what `output` holds.
+ */
+describe("target-only plural categories survive a plural-unaware provider", () => {
+  const RU_TARGET = {
+    item_one: "{{count}} товар",
+    item_few: "{{count}} товара",
+    item_many: "{{count}} товаров",
+    item_other: "{{count}} товара",
+  };
+
+  it("keeps _few and _many when DeepL retranslates the source keys", async () => {
+    const result = await translateNamespace({
+      sourceFlat: RU_SOURCE,
+      targetFlat: RU_TARGET,
+      cacheEntries: {},
+      provider: createMockProvider(),
+      targetLang: "ru",
+      // Force: every source key is retranslated, which is exactly the case the
+      // old carry-over loop skipped.
+      force: true,
+    });
+
+    expect(result.output.item_few).toBe("{{count}} товара");
+    expect(result.output.item_many).toBe("{{count}} товаров");
+    // The source keys really were retranslated — otherwise this would pass for
+    // a run that simply did nothing.
+    expect(result.output.item_one).toBe("[ru] {{count}} item");
+    expect(result.outputKeyOrder).toContain("item_many");
+  });
+
+  it("keeps them on an incremental run too", async () => {
+    const result = await translateNamespace({
+      sourceFlat: RU_SOURCE,
+      targetFlat: RU_TARGET,
+      cacheEntries: {},
+      provider: createMockProvider(),
+      targetLang: "ru",
+      force: false,
+    });
+
+    expect(result.output.item_few).toBe("{{count}} товара");
+    expect(result.output.item_many).toBe("{{count}} товаров");
+  });
+
+  it("never invents a target-only category the file does not have", async () => {
+    const result = await translateNamespace({
+      sourceFlat: RU_SOURCE,
+      targetFlat: {},
+      cacheEntries: {},
+      provider: createMockProvider(),
+      targetLang: "ru",
+      force: false,
+    });
+
+    expect(result.output.item_few).toBeUndefined();
+    expect(result.output.item_many).toBeUndefined();
+  });
+});
+
+/**
+ * CEL-1533 #4.
+ *
+ * `translated`, `changed` and `skipped` count SOURCE keys; `failed` counts
+ * EMITTED keys. A plural group collapses several source keys into one chunk
+ * entry and expands back into one key per target category, so mixing the two
+ * units miscounts in both directions.
+ */
+describe("counts survive a collapsed plural group", () => {
+  it("does not report a failed group as updated as well", async () => {
+    const changedCache = {
+      item_one: hashValue("stale"),
+      item_other: hashValue("stale"),
+    };
+
+    const result = await translateNamespace({
+      sourceFlat: RU_SOURCE,
+      targetFlat: {
+        item_one: "{{count}} товар",
+        item_few: "{{count}} товара",
+        item_many: "{{count}} товаров",
+        item_other: "{{count}} товара",
+      },
+      cacheEntries: changedCache,
+      provider: createLeakingProvider(),
+      targetLang: "ru",
+      force: false,
+    });
+
+    // Both source keys are `changed` (the cached hash is stale) and both fail.
+    // Reporting them as updated AND failed in the same summary is the miscount.
+    expect(result.changed).toBe(0);
+    expect(result.translated).toBe(0);
+    // `failed` is the EMITTED count: four ru categories, not two source keys.
+    expect(result.failed).toBe(4);
+  });
+
+  it("does not report a degraded group as translated", async () => {
+    // Degrades every emitted category, the way the real guard path marks them.
+    const provider: TranslationProvider = {
+      name: "degrading-plural",
+      supportsPluralExpansion: true,
+      translate: vi.fn(async (entries: TranslationEntry[]) =>
+        entries.flatMap((e) =>
+          (e.plural?.targetCategories ?? []).map((category) => ({
+            key: `${e.plural!.base}_${category}`,
+            value: "{{count}} items",
+            degraded: {
+              reason: "identical-to-source",
+              detail: "value is the English source verbatim",
+            },
+          }))
+        )
+      ),
+    };
+
+    const result = await translateNamespace({
+      sourceFlat: RU_SOURCE,
+      targetFlat: {},
+      cacheEntries: {},
+      provider,
+      targetLang: "ru",
+      force: false,
+    });
+
+    // A degraded key kept the previous value or wrote unvouched-for output and
+    // left the cache; it did not receive a fresh translation.
+    expect(result.translated).toBe(0);
+    expect(result.failed).toBe(0);
+    expect(Object.keys(result.newCacheEntries)).toEqual([]);
+  });
+
+  it("still counts a clean group as translated", async () => {
+    // Anti-vacuity: the two tests above would pass for an implementation that
+    // reported zero for everything.
+    const result = await translateNamespace({
+      sourceFlat: RU_SOURCE,
+      targetFlat: {},
+      cacheEntries: {},
+      provider: createPluralAwareProvider(),
+      targetLang: "ru",
+      force: false,
+    });
+
+    expect(result.translated).toBe(2);
+    expect(result.failed).toBe(0);
   });
 });

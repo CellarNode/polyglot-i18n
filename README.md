@@ -152,17 +152,27 @@ model for the full set:
 Details worth knowing:
 
 - **Detection is conservative.** A key only counts as a plural when its base has an `_other`
-  variant, which i18next requires. A lone `step_one` ("Step one") is left alone.
+  variant, which i18next requires. A lone `step_one` ("Step one") is left alone. A base with
+  NOTHING but `_other` needs a count placeholder to qualify: `listingCount_other`
+  ("{{count}} listings") is a plural, `document.kind_other` ("Document") is an enum member and
+  expanding it would invent `_one`/`_few`/`_many` keys i18next then serves.
 - **Categories are never removed.** The emitted set is the union of the English categories and
   the target's own, so a language with fewer categories than English (`zh`, `ja`) keeps its
   existing translations.
 - **Existing locales upgrade themselves.** A target file missing a category its language needs
   is regenerated on the next run even when the English source is unchanged — no `--force`.
+- **A group filled with the English source is regenerated too.** A locale where every category
+  holds the English form it would have been backfilled with is complete by key count and carries
+  no translation; it is retranslated without `--force`. Only groups whose English has two or more
+  distinct forms qualify — one form repeated is what a filename or a `{{count}} мл` legitimately
+  looks like.
 - **The cache stays keyed on English.** `.polyglot-cache.json` tracks the English source keys;
-  the extra target-only forms are carried over untouched between runs.
+  the extra target-only forms are carried over untouched between runs. It is scoped per namespace
+  and shared across languages, so a key any language drops stays dropped for the whole run.
 - **Ordinals are handled too** — an i18next `_ordinal_*` key resolves against ordinal rules.
-- **Gemini only.** DeepL translates strings, not key sets, so the DeepL provider keeps writing
-  the flat English key set.
+- **Gemini writes them; DeepL never deletes them.** DeepL translates strings, not key sets, so it
+  is still sent the flat English key set. Target-only categories already in the file are carried
+  over untouched, so pointing DeepL at a locale Gemini expanded does not wipe its `_few`/`_many`.
 
 ## Translation-quality guard
 
@@ -187,17 +197,27 @@ What happens to a value that is still flagged afterwards depends on what it is:
 
 | Shape | Outcome |
 | --- | --- |
-| English spliced into a translated value, missing value, uniform plural group | **Blocked.** The previous translation is kept, or the key is left out of the file entirely. Counted in `failed`, reported in `errors`, dropped from the cache. |
-| Byte-identical to the source | **Never blocked.** The previous translation wins if there is one; otherwise the value is written. Reported as a warning and dropped from the cache, never counted in `failed`. |
+| English spliced into a translated value, or no value at all | **Blocked.** The previous translation is kept, or the key is left out of the file entirely. Counted in `failed`, reported in `errors`, dropped from the cache. |
+| Byte-identical to the source, **and** built from ordinary UI vocabulary (`Save`, `Download labels`) | **Blocked**, same as above. The whole value is the source and every word in it is one a translator renders — English never reaches the file. |
+| Byte-identical to the source, uncorroborated (`Systembolaget`, `Vintage`, `qr-labels-{{count}}.zip`) | **Never blocked.** The previous translation wins if there is one; otherwise the value is written. Reported as a warning and dropped from the cache, never counted in `failed`. |
+| A uniform plural group | **Never blocked.** Same as above: warned, written or beaten by the previous translation, dropped from the cache. |
 | A category copied from a translated `_other` | **Written**, reported as a warning. |
 
 English is never written over a gap on any path — including an API outage, where a failed chunk
 keeps existing translations and omits the keys that have none.
 
-The byte-identical case is deliberately non-fatal. Filenames (`qr-labels-{{count}}.zip`), slugs
-and brand-only labels (`Systembolaget`, `TanStack Query`) are identical by necessity, and failing
-them would exit the CLI non-zero on every run with no way to satisfy it. Only the target file can
-tell those apart from a real leak, so the decision is made there.
+The **uncorroborated** byte-identical case is deliberately non-fatal. Filenames
+(`qr-labels-{{count}}.zip`), slugs and brand-only labels (`Systembolaget`, `TanStack Query`) are
+identical by necessity, and failing them would exit the CLI non-zero on every run with no way to
+satisfy it. Only the target file can tell those apart from a real leak, so the decision is made
+there.
+
+A uniform group that is uniform BY NECESSITY (`{{count}} мл` — Russian unit abbreviations do not
+inflect) can never stop being suspect, so it costs one corrective retry and one cache eviction on
+**every run, forever**. That is the accepted price of never caching a value the guard cannot
+distinguish from a real under-differentiation. It applies to Latin-script `pl`, `cs`, `lt` and
+`lv` as well, because the uniform check is deliberately outside the script gate — those languages
+need four CLDR categories just as `ru` does.
 
 ### What is never reported as a leak
 
@@ -212,13 +232,22 @@ dropped, the cache entry is removed, and the next run fails it again. Exempt fro
   An unknown word is assumed to be a domain term or a loanword a locale keeps on purpose —
   `cookie`, `email`, `e-label`, `Logo`, `Favicon`, `Incoterm`, `Systembolaget`.
 
+A byte-identical value is additionally left **silent** when the source could not have been
+translated at all: a single unbroken token carrying a path or extension separator
+(`qr-labels-{{count}}.zip`, `locales/en/common.json`, `bulk_qr_codes`), or a string made only of
+placeholders, brand spellings and proper nouns (`TanStack Query`, `{{count}} PDF`). An internal
+hyphen is **not** enough on its own — `Sign-up`, `Read-only` and `Vintage.` are ordinary English,
+and exempting them left them silent *and* cached.
+
 `src/__tests__/leak-guard-corpus.test.ts` replays the detector over verbatim `en`→`zh`/`ru` pairs
 taken from the locale files shipping in producer-dashboard, importer-dashboard, public-site and
 `@cellarnode/i18n`, and asserts that none of them is reported.
 
-Latin-script targets (`fr`, `de`, `it`, `es`, `sv`) get the prompt hardening but neither the
-source-echo nor the identical-value check: a stray `option` there is indistinguishable from a
-loanword.
+Latin-script targets (`fr`, `de`, `it`, `es`, `sv`) get the prompt hardening, the missing-value
+check and the uniform-plural check, but neither the source-echo nor the identical-value check: a
+stray `option` there is indistinguishable from a loanword. Everything this section says about a
+value being warned rather than silently cached is therefore a guarantee about **non-Latin**
+targets.
 
 ## Providers
 

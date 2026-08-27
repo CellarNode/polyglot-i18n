@@ -89,8 +89,12 @@ language's CLDR categories via `Intl.PluralRules`, and the Gemini provider is as
 set — so `item_one`/`item_other` in English becomes `item_one`/`item_few`/`item_many`/`item_other`
 in Russian and Polish. The emitted set is the union of English's categories and the target's, so
 languages with fewer categories (zh, ja) never lose translations. Detection requires an `_other`
-sibling, which keeps incidental keys like `step_one` out of the expansion path. DeepL does not opt
-in (`TranslationProvider.supportsPluralExpansion`) and keeps the flat English key set.
+sibling, which keeps incidental keys like `step_one` out of the expansion path — and a base with
+NOTHING but `_other` needs a count placeholder to qualify, so `document.kind_other` ("Document")
+is an enum member rather than a plural. DeepL does not opt in
+(`TranslationProvider.supportsPluralExpansion`) and is still sent the flat English key set, but
+`translateNamespace` carries over target-only categories already in the file for EVERY provider —
+running DeepL over a locale Gemini expanded must not delete its `_few`/`_many` (CEL-1533).
 
 ## Translation-quality guard
 
@@ -102,6 +106,15 @@ chunk gets exactly one corrective retry; values that are still bad are marked
 translation, counts the key as failed, and drops it from the cache so the next run retries it.
 The parser NEVER substitutes the English source for a missing key; that backfill is what shipped
 429 English strings to production in 0.3.0 (CEL-1539).
+
+Two rules are easy to get backwards. `block` — the only disposition that loses a value and the
+only one that exits the CLI non-zero — covers an English token spliced into a translated value, a
+missing value, and a byte-identical value whose words are on `TRANSLATABLE_WORDS`. It must NEVER
+cover an uncorroborated byte-identical value (a filename, a slug, a brand) or a uniform plural
+group: both are correct by necessity often enough that blocking them makes the job permanently
+red. And every check except the missing-value and uniform-plural ones is gated on the target
+using a non-Latin script, so "never silent-and-cached" is a guarantee about zh/ru/uk/ar, not fr
+or sv.
 
 ## CRITICAL: do not run `instrument`
 

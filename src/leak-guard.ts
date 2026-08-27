@@ -1,4 +1,9 @@
-import { getPluralCategories, pluralTypeForBase, sourceFormFor } from "./plurals.js";
+import {
+  COUNT_PLACEHOLDER_RE,
+  getPluralCategories,
+  pluralTypeForBase,
+  sourceFormFor,
+} from "./plurals.js";
 import type { TranslationEntry } from "./providers/types.js";
 
 /**
@@ -20,6 +25,20 @@ import type { TranslationEntry } from "./providers/types.js";
  * loanwords retained on purpose (`cookie`, `email`, `e-label`) are legitimate
  * in every locale. A guard that fails them turns a translation job permanently
  * red and can never be satisfied.
+ *
+ * SCOPE — read this before quoting the invariant below.
+ *
+ * Every check except `no-target-form` and `uniform-plural` is gated on the
+ * target language using a non-Latin script (`usesNonLatinScript`). In French or
+ * Swedish an English-looking token is indistinguishable from a loanword, so no
+ * echo or identity check runs there at all. "Silent-and-cached is the one
+ * outcome this module must never produce" is therefore a guarantee about
+ * NON-LATIN targets: a byte-identical `fr` value is still written and cached,
+ * exactly as it was before this module existed.
+ *
+ * `uniform-plural` sits outside that gate on purpose — Latin-script pl, cs, lt
+ * and lv need four CLDR categories just as ru does — so those languages do get
+ * one check, and pay its cost (see the disposition on that suspect).
  */
 
 export type LeakReason =
@@ -40,19 +59,21 @@ export type LeakReason =
  * `block` is the only disposition that can lose a value — it is what turns the
  * CLI non-zero — so it is RESERVED for values that demonstrably carry
  * source-language text: an English token spliced into an otherwise-translated
- * value, or no value at all. Nothing else may block.
+ * value, no value at all, or a value that IS the source and is built from
+ * ordinary UI vocabulary a translator renders.
  *
- * In particular a byte-identical value is never blocked (filenames like
- * `qr-labels-{{count}}.zip`, slugs and brand-only strings are identical by
- * necessity), and neither is a uniform plural group: "{{count}} мл" repeated
- * across all four Russian categories is correct Russian, and blocking it makes
- * the job permanently red with no way to satisfy it.
+ * What may never block is an UNCORROBORATED byte-identical value — filenames
+ * like `qr-labels-{{count}}.zip`, slugs, brand-only strings and domain terms
+ * are identical by necessity, and the vocabulary list has no signal for them —
+ * and a uniform plural group: "{{count}} мл" repeated across all four Russian
+ * categories is correct Russian, and blocking it makes the job permanently red
+ * with no way to satisfy it.
  *
  * `prefer-previous` is the degrade path for everything else: keep the previous
  * translation when the target file has one, otherwise write the value with a
  * warning — and in BOTH cases leave the key out of the cache so the next run
  * tries again. Silent-and-cached is the one outcome this module must never
- * produce.
+ * produce (within the script scope stated at the top of the file).
  */
 export type LeakDisposition =
   /** Never write the value: keep the previous translation, or omit the key. */
@@ -258,14 +279,26 @@ export function findSourceEchoTokens(
 
 /**
  * A source that survives translation unchanged BY NECESSITY: a filename, slug,
- * path or bare identifier. Recognised structurally — one unbroken token once
- * placeholders are removed, carrying a separator (`.`, `_`, `/`) or an internal
- * hyphen. `qr-labels-{{count}}.zip` qualifies; `Save` does not.
+ * path or dotted identifier. Recognised structurally — one unbroken token once
+ * placeholders are removed, carrying a path or extension separator.
+ *
+ * `_` and `/` are never sentence punctuation, so one of those settles it. A
+ * period counts only when it sits BETWEEN two characters (`.zip`, `a.b.c`),
+ * never when it merely ends the token: `Vintage.` is a word with a full stop.
+ *
+ * An internal hyphen is NOT a signal on its own. `Sign-up`, `Read-only`,
+ * `Real-time`, `Opt-in` and `Follow-up` are ordinary English compounds a
+ * translator renders, and exempting them left a byte-identical English value
+ * both silent AND cached — the one outcome this module exists to prevent
+ * (CEL-1542). `qr-labels-{{count}}.zip` still qualifies, on its `.zip` rather
+ * than its hyphens. The cost is that a bare hyphenated slug with no separator
+ * (`cellarnode-admin`) now degrades instead of passing silently: a warning and
+ * a retranslation next run, never a failure.
  */
 function isIdentifierShaped(source: string): boolean {
   const tight = stripVerbatimTight(source).trim();
   if (tight === "" || /\s/.test(tight)) return false;
-  return /[._/]|[A-Za-z]-[A-Za-z]/.test(tight);
+  return /[_/]/.test(tight) || /[^.]\.[^.]/.test(tight);
 }
 
 /**
@@ -349,7 +382,18 @@ function checkValue(
       // an API call. Either way the value degrades: warned, and left out of the
       // cache so the next run tries again.
       severity: leaked.length > 0 ? "fail" : "warn",
-      disposition: "prefer-previous",
+      // A CORROBORATED identity is source-language text by any reading: the
+      // whole value is the source AND it is built from words a translator
+      // renders. It is blocked like any other echo — previous translation or
+      // nothing, never English on disk. Writing it was recoverable (the group
+      // left the cache and the CLI still exited 1) but the write happened, and
+      // in a uniform plural group it put English into every fallback category
+      // (CEL-1542).
+      //
+      // Uncorroborated identity stays `prefer-previous`: a filename, a slug or
+      // a brand-only label is identical by necessity, and blocking those failed
+      // the CLI on every run with no answer that could satisfy it.
+      disposition: leaked.length > 0 ? "block" : "prefer-previous",
     };
   }
 
@@ -363,15 +407,19 @@ function checkValue(
   };
 }
 
-/** Source forms carrying a count placeholder must inflect per category. */
-const COUNT_PLACEHOLDER_RE = /\{\{[^}]*\}\}|\{[0-9]+\}|%[sd]/;
-
 /**
  * Inspects parsed provider output for the CEL-1539 failure shapes.
  *
  * `translated` is the provider's parsed result; `filledFromOther` names the
  * keys the parser backfilled from the group's translated `_other` form (a
  * usable value, but evidence the model under-differentiated the categories).
+ *
+ * INVARIANT `filledFromOther` must satisfy: it never contains `${base}_other`.
+ * The parser only backfills a key from a usable `_other`, so `_other` itself
+ * can never be backfilled — if it were, the `alreadyReported` dedup below would
+ * mark `_other` with an `accept` disposition and suppress the `prefer-previous`
+ * uniform-plural suspect on that one key, leaving the group half-cached.
+ * `parseGeminiResponse` is what upholds it, and a test pins it there.
  */
 export function detectLeaks(
   requested: TranslationEntry[],
@@ -467,6 +515,19 @@ export function detectLeaks(
         // the CLI on every run with no answer that could satisfy it (review
         // round 2, P1b). Real leakage is caught by `checkValue` above, where
         // `block` belongs.
+        //
+        // ACCEPTED COST: a group that is uniform BY NECESSITY can never stop
+        // being suspect, so every run spends one corrective retry on it and
+        // then evicts it from the cache — forever, for as long as the key
+        // exists. The alternative is caching a value we cannot tell apart from
+        // a real under-differentiation, which is the CEL-1539 defect. The cache
+        // cannot carry an "accepted" marker to end it either: it is keyed by
+        // namespace and source hash with no language dimension (`translate()`
+        // rewrites the same map once per language), so a marker set while
+        // translating ru would silence zh too. This cost lands on Latin-script
+        // pl/cs/lt/lv as well, because this check is outside the non-Latin
+        // script gate on purpose — those languages differentiate four
+        // categories just as ru does.
         severity: "fail",
         disposition: "prefer-previous",
       });
