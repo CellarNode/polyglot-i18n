@@ -1,0 +1,46 @@
+src/__tests__/leak-guard-corpus.test.ts
+  s_b307391c251243::t_a79e0f390bb2ee 26-32
+  s_b307391c251243::t_ad630d0dfee99b 99-115,179
+  s_b307391c251243::t_c3c1cb25b63693 116
+  s_b307391c251243::t_02f9392d2eaaa3 49-51
+  s_b307391c251243::t_bbf085cdde4a6d 119-125,139-178
+  s_e494ddb2690bdf::t_cbb5f6ad98e9bb 180
+src/__tests__/providers/gemini-guard.test.ts
+  s_b307391c251243::t_0d16b17574d42a 328,339-340,343,345,348-374
+  s_b307391c251243::t_ba72ac87c8698d 25
+  s_b307391c251243::t_52db0143053589 216,224-227,229-306,375
+src/__tests__/leak-guard.test.ts
+  s_b307391c251243::t_b316cbe9cf82a9 473-685
+  s_b307391c251243::t_a4af1c07faf931 281-284
+src/leak-guard.ts
+  s_b307391c251243::t_43577fb4957f96 116-123
+  s_b307391c251243::t_b5276aa5df78c4 406-411,422,438,456-457,459,462-469,471
+  s_b307391c251243::t_896c4bd6864377 40-55
+  s_b307391c251243::t_2bb314c68e0e27 286-288
+  s_b307391c251243::t_be5e11228a5fa4 259-285,289-293
+  s_b307391c251243::t_de72de9a4003cd 321-330,334-338,342-351,355-356
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "f4461818e13f16807b3becbbfa64b073985e6bef",
+  "prompts": {},
+  "sessions": {
+    "s_b307391c251243": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "8c2f8e8a-6a3a-4ebf-a791-70c464da37fe",
+        "model": "claude-fable-5"
+      },
+      "human_author": "mjnong <marcusnagy@icloud.com>"
+    },
+    "s_e494ddb2690bdf": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0333d-6bf6-78b1-91b9-1f7413f8c7de",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "mjnong <marcusnagy@icloud.com>"
+    }
+  }
+}
