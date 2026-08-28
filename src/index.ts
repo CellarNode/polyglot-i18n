@@ -12,10 +12,35 @@ export type {
 export {
   collectPluralGroups,
   getPluralCategories,
+  isEnglishFallbackGroup,
+  rejectedPluralBases,
   splitPluralKey,
   PLURAL_CATEGORIES,
 } from "./plurals.js";
-export type { PluralCategory, PluralGroup } from "./plurals.js";
+export type {
+  PluralCategory,
+  PluralGroup,
+  PluralRejectReason,
+} from "./plurals.js";
+export {
+  acceptedKeysForSource,
+  computeDiff,
+  entryLangProvenance,
+  hashValue,
+  mergeNamespaceCache,
+  pendingRetryKeys,
+  viewForLanguage,
+} from "./cache.js";
+export type {
+  CacheEntry,
+  CacheRecord,
+  FullCache,
+  LangCacheState,
+  LangProvenance,
+  LanguageCacheView,
+  NamespaceCache,
+  NamespaceCacheUpdate,
+} from "./cache.js";
 export {
   detectLeaks,
   findSourceEchoTokens,

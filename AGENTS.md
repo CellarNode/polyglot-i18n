@@ -56,7 +56,46 @@ The action creates a PR with translated files. Consumer workflow needs `contents
 
 ## Incremental cache
 
-`.polyglot-cache.json` tracks per-key SHA hashes of the English source. Only changed keys are retranslated. **ALWAYS commit the cache file** — it prevents the CI pipeline from clobbering manual translation fixes.
+`.polyglot-cache.json` tracks per-key SHA hashes of the English source. Only changed keys are
+retranslated. **ALWAYS commit the cache file** — it prevents the CI pipeline from clobbering
+manual translation fixes.
+
+The cache has a **language dimension** since 0.4.0 (CEL-1543). An entry is either a bare hash —
+what every version up to 0.3.2 wrote, read as "every language's value on disk answers this text" —
+or `{ hash, langs: { zh: { hash, state?: "stale" | "accepted" } } }`. Only divergence is recorded,
+so an all-clean namespace stays a plain hash map and existing cache files need no migration; a key
+upgrades to the record shape the first time a language diverges on it.
+
+Three rules hold the whole design up:
+
+- **A language's `hash` is PROVENANCE, not a timestamp.** It is the English text that language's
+  value on disk was made from. Stamping a marker with whatever hash was current when it was
+  written let the next run read an eviction as "asked about exactly this text" when it had in fact
+  kept a translation of the PREVIOUS text — and accept it. A record with NO hash means nothing
+  vouches for the file at all: never cached, never accept-eligible.
+- **The entry-level `hash` is the default for unlisted languages, and it is FROZEN.** It is set
+  once, when the entry is created, and never advances. 0.3.x rewrote a shared hash inside the
+  per-language loop, so after an English edit the first language retranslated and every later one
+  measured its own stale file against the new hash and skipped.
+- **`mergeNamespaceCache` touches one language.** 0.3.x held the union of every eviction in memory
+  and rewrote the whole namespace on each language's turn, so the eviction died with the process:
+  `-o zh` then `-o ru` as two commands put the key back and cached a value nothing had vouched
+  for. It also billed every other language for a retranslation it did not need.
+
+A language with no record is cached at the default. Safe because a language with no value on disk
+is classified `missing` by `computeDiff` before the cache is consulted, so "cached" can only be
+reached by a language that already has one.
+
+`accepted` is the mitigation the dimension unlocks: a key whose target file already holds a better
+answer than the provider can produce (a uniform `{{count}} мл` group, a `{{count}} PDF` the leak
+guard examined and waved through) stops being retried, for that language, against that source
+hash. It never forms under `--force`, and never where the leak guard did not run — on a
+Latin-script target an English leak is indistinguishable from a value that is English by
+necessity, so the re-queue stands and the per-run cost is paid. A target file holding the English
+source is accepted only through one deliberate path: a non-Latin group that converged to the
+English source across two guard-examined rounds; everywhere else an English-holding file goes
+back to being retried. Both eviction and accept are per language by construction —
+`staleSourceKeys` / `acceptedSourceKeys` / `sourceProvenance` on `NamespaceResult`.
 
 ## Structure
 
@@ -66,7 +105,7 @@ src/
 ├── index.ts           # Public API
 ├── translate.ts       # Core translation loop
 ├── chunk.ts           # Batch keys to respect provider token limits
-├── cache.ts           # .polyglot-cache.json read/write
+├── cache.ts           # .polyglot-cache.json read/write + per-language resolution
 ├── json-utils.ts      # Recursive JSON walking (preserves nesting)
 ├── placeholder.ts     # Protect {{variables}}, plurals (_one/_other), HTML tags
 ├── plurals.ts         # CLDR plural groups + Intl.PluralRules category resolution

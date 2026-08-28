@@ -360,9 +360,11 @@ function checkValue(
   // AND cached as translated, so no future run ever retried it — the exact
   // 0.3.0 shape this module exists to stop (review round 2, P1a).
   //
-  // A value that IS the source is retried, but NEVER blocked: it is the shape
-  // both a genuine leak and a legitimately-untranslatable string take, and only
-  // the previous translation can tell them apart.
+  // A value that IS the source is ALWAYS retried. Whether it is also blocked
+  // depends on corroboration, and the two answers are set out key by key below:
+  // corroborated identity is blocked like any other echo (CEL-1542), while
+  // uncorroborated identity prefers the previous translation, because only the
+  // target file can tell a real leak from a string that has no other form.
   if (value.trim() === sourceText.trim()) {
     // Nothing a translator could have rendered — `TanStack Query`,
     // `qr-labels-{{count}}.zip`. Identical is the only correct answer.

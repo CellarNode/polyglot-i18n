@@ -119,6 +119,27 @@ export function collectPluralGroups(
   sourceFlat: Record<string, string>,
   targetLang: string
 ): Map<string, PluralGroup> {
+  const groups = collectSourceForms(sourceFlat);
+
+  for (const [base, group] of groups) {
+    if (rejectReasonFor(group.sourceForms) !== null) {
+      groups.delete(base);
+      continue;
+    }
+    const type = pluralTypeForBase(base);
+    group.targetCategories = sortCategories([
+      ...Object.keys(group.sourceForms),
+      ...getPluralCategories(targetLang, type),
+    ]);
+  }
+
+  return groups;
+}
+
+/** Every `_category`-suffixed base in the source, before either guard runs. */
+function collectSourceForms(
+  sourceFlat: Record<string, string>
+): Map<string, PluralGroup> {
   const groups = new Map<string, PluralGroup>();
 
   for (const key of Object.keys(sourceFlat)) {
@@ -139,29 +160,48 @@ export function collectPluralGroups(
     group.sourceKeys.push(key);
   }
 
-  for (const [base, group] of groups) {
-    const categories = Object.keys(group.sourceForms);
-    if (!categories.includes("other")) {
-      groups.delete(base);
-      continue;
-    }
-    // The `_other`-sibling guard was one-sided: a base with NOTHING but
-    // `_other` passed it and was expanded into a full plural group (CEL-1533).
-    if (
-      categories.length === 1 &&
-      !COUNT_PLACEHOLDER_RE.test(group.sourceForms.other)
-    ) {
-      groups.delete(base);
-      continue;
-    }
-    const type = pluralTypeForBase(base);
-    group.targetCategories = sortCategories([
-      ...categories,
-      ...getPluralCategories(targetLang, type),
-    ]);
-  }
-
   return groups;
+}
+
+/** Why a suffixed base is not a plural group, or `null` when it is one. */
+export type PluralRejectReason =
+  | "no-other-variant"
+  | "lone-other-without-count";
+
+function rejectReasonFor(
+  sourceForms: Record<string, string>
+): PluralRejectReason | null {
+  const categories = Object.keys(sourceForms);
+  if (!categories.includes("other")) return "no-other-variant";
+  // The `_other`-sibling guard was one-sided: a base with NOTHING but
+  // `_other` passed it and was expanded into a full plural group (CEL-1533).
+  if (categories.length === 1 && !COUNT_PLACEHOLDER_RE.test(sourceForms.other)) {
+    return "lone-other-without-count";
+  }
+  return null;
+}
+
+/**
+ * Bases that LOOK like plural groups — they carry a CLDR category suffix — but
+ * are excluded by the guards above, with the reason.
+ *
+ * Derived from the same `rejectReasonFor` that `collectPluralGroups` deletes
+ * with, so the two can never drift apart. Reported because the exclusion has a
+ * side effect worth naming: a `_one`/`_few`/`_many` sibling an earlier run
+ * invented for the base has no source key and now belongs to no group, so the
+ * writer drops it from the target file. That is the right outcome — i18next
+ * would serve those keys for every count that is not "other" — but 0.3.x did it
+ * with no output at all.
+ */
+export function rejectedPluralBases(
+  sourceFlat: Record<string, string>
+): Map<string, PluralRejectReason> {
+  const rejected = new Map<string, PluralRejectReason>();
+  for (const [base, group] of collectSourceForms(sourceFlat)) {
+    const reason = rejectReasonFor(group.sourceForms);
+    if (reason !== null) rejected.set(base, reason);
+  }
+  return rejected;
 }
 
 /** Maps every source key of every group back to its group. */
@@ -175,6 +215,48 @@ export function indexGroupsBySourceKey(
   return index;
 }
 
+/** Why a plural group has to be regenerated despite an unchanged source. */
+export interface IncompletePluralClassification {
+  /** Source keys of groups missing a category the target language needs. */
+  missingCategories: string[];
+  /**
+   * Source keys of groups whose target reproduces the English source in every
+   * category. Split out from `missingCategories` because the two converge
+   * differently: a missing category is filled by one successful run, while an
+   * English-verbatim group can come back English again and again.
+   */
+  englishFallback: string[];
+}
+
+/**
+ * Splits the "regenerate even though the source is unchanged" set by reason.
+ * The two lists are disjoint: a group with a missing category cannot also hold
+ * the English form in every category.
+ */
+export function classifyIncompletePluralGroups(
+  targetFlat: Record<string, string>,
+  groups: Map<string, PluralGroup>
+): IncompletePluralClassification {
+  const missingCategories: string[] = [];
+  const englishFallback: string[] = [];
+
+  for (const group of groups.values()) {
+    const complete = group.targetCategories.every((category) => {
+      const key = `${group.base}_${category}`;
+      return key in targetFlat && targetFlat[key] !== "";
+    });
+    if (!complete) {
+      missingCategories.push(...group.sourceKeys);
+      continue;
+    }
+    if (isEnglishFallbackGroup(targetFlat, group)) {
+      englishFallback.push(...group.sourceKeys);
+    }
+  }
+
+  return { missingCategories, englishFallback };
+}
+
 /**
  * Source keys of every plural group whose target file needs regenerating even
  * though its English source is unchanged. Two shapes qualify:
@@ -186,28 +268,42 @@ export function indexGroupsBySourceKey(
  *   with. Such a group is complete by key count and carries no translation at
  *   all; nothing else in the pipeline can rescue it, because the source hash
  *   never changes and the cache says "done" (CEL-1533).
+ *
+ * `acceptedSourceKeys` are keys the target language has already retried and
+ * stopped asking about (see `LangCacheState`). Only the second shape honours
+ * them: a group missing a category is regenerated regardless, because the file
+ * is structurally wrong and one successful run fixes it. Without that, a group
+ * that is English by necessity — a `{{count}} PDF` the leak guard examined and
+ * waved through — burned a retranslation on every run forever. On a
+ * Latin-script target the guard does not run at all, so no accept is recorded
+ * there and the re-queue is what keeps a real leak recoverable.
  */
 export function incompletePluralSourceKeys(
   targetFlat: Record<string, string>,
-  groups: Map<string, PluralGroup>
+  groups: Map<string, PluralGroup>,
+  acceptedSourceKeys: ReadonlySet<string> = new Set()
 ): string[] {
-  const keys: string[] = [];
-  for (const group of groups.values()) {
-    const complete = group.targetCategories.every((category) => {
-      const key = `${group.base}_${category}`;
-      return key in targetFlat && targetFlat[key] !== "";
-    });
-    if (!complete || isEnglishFallback(targetFlat, group)) {
-      keys.push(...group.sourceKeys);
-    }
-  }
-  return keys;
+  const { missingCategories, englishFallback } =
+    classifyIncompletePluralGroups(targetFlat, groups);
+  return [
+    ...missingCategories,
+    // Accepts are always recorded for a whole group, so filtering per key and
+    // per group agree; a half-marked group re-queues, which is the safe way to
+    // be wrong.
+    ...englishFallback.filter((key) => !acceptedSourceKeys.has(key)),
+  ];
 }
 
 /**
- * True when the target reproduces the group's English source forms verbatim in
- * every category — the exact shape `expandPluralFallback` writes, and the shape
+ * True when the target reproduces the group's English source forms in every
+ * category — the exact shape `expandPluralFallback` writes, and the shape
  * 0.3.0 shipped to production across seven locales.
+ *
+ * Compared on TRIMMED values, the same rule the leak guard blocks on
+ * (`value.trim() === sourceText.trim()`). Providers do not trim individual
+ * values, so an English form with a stray leading space is the English source
+ * by every standard that matters — and under byte equality it was neither
+ * flagged here nor re-queued, which is silent-and-cached by whitespace.
  *
  * Requires the English source to have TWO OR MORE DISTINCT forms. One form
  * repeated across every category is what a filename, a slug or a Russian unit
@@ -215,16 +311,26 @@ export function incompletePluralSourceKeys(
  * them on every run forever with no answer that could satisfy the check. Two
  * distinct English forms reproduced exactly, category by category, is not
  * something a real translation arrives at.
+ *
+ * That exemption covers only the single-form case. A multi-form group CAN be
+ * English by necessity too — a brand-shaped source — so the caller may stop
+ * re-queueing a group that has already come back English once
+ * (`acceptedSourceKeys` above). On a Latin-script target, where the leak guard
+ * does not run and nothing has judged the value, `translateNamespace` refuses
+ * to record that accept and pays the re-queue instead.
  */
-function isEnglishFallback(
+export function isEnglishFallbackGroup(
   targetFlat: Record<string, string>,
   group: PluralGroup
 ): boolean {
   if (new Set(Object.values(group.sourceForms)).size < 2) return false;
   return group.targetCategories.every((category) => {
     const english = sourceFormFor(group, category);
+    const value = targetFlat[`${group.base}_${category}`];
     return (
-      english !== undefined && targetFlat[`${group.base}_${category}`] === english
+      english !== undefined &&
+      value !== undefined &&
+      value.trim() === english.trim()
     );
   });
 }
