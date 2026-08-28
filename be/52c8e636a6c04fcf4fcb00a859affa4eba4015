@@ -1,0 +1,29 @@
+src/cache.ts
+  s_b307391c251243::t_aadb9b133aeded 288-300
+src/__tests__/translate-files.test.ts
+  s_b307391c251243::t_c7c1b71ac1820d 960-995
+package.json
+  s_b307391c251243::t_3b411f02e2ae5a 3
+src/translate.ts
+  s_b307391c251243::t_a8e6eb669dd97d 888-904
+AGENTS.md
+  s_b307391c251243::t_ac8b33e53ba34c 65-74
+  s_b307391c251243::t_e6842450ac2e99 86-91
+  s_b307391c251243::t_cd5464bb4150cb 97-111
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "be52c8e636a6c04fcf4fcb00a859affa4eba4015",
+  "prompts": {},
+  "sessions": {
+    "s_b307391c251243": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "8c2f8e8a-6a3a-4ebf-a791-70c464da37fe",
+        "model": "claude-fable-5"
+      },
+      "human_author": "mjnong <marcusnagy@icloud.com>"
+    }
+  }
+}
