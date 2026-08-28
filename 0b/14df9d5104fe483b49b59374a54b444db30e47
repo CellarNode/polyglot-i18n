@@ -1,0 +1,21 @@
+src/cli.ts
+  s_b307391c251243::t_e4fed4cd3c660a 15
+src/__tests__/cli-version.test.ts
+  s_b307391c251243::t_38842b625237e0 1-24
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "0b14df9d5104fe483b49b59374a54b444db30e47",
+  "prompts": {},
+  "sessions": {
+    "s_b307391c251243": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "8c2f8e8a-6a3a-4ebf-a791-70c464da37fe",
+        "model": "claude-fable-5"
+      },
+      "human_author": "mjnong <marcusnagy@icloud.com>"
+    }
+  }
+}
