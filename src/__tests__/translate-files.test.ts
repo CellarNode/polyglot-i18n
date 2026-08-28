@@ -957,6 +957,42 @@ describe("translate — an English edit reaches every language", () => {
   });
 });
 
+/**
+ * CEL-1545 P2.
+ *
+ * `--no-cache` sets `cacheFilePath` to `null` so nothing is read from or
+ * written to disk, but the in-memory `fullCache` object used to persist for
+ * the length of one `translate()` call regardless — the first language's
+ * write minted a bare-hash entry the next language's read then treated as its
+ * own cached provenance. `-o zh,ru` therefore skipped every ru key whose
+ * target file already had a value, exactly the run `--no-cache` exists to
+ * force through the provider.
+ */
+describe("translate — --no-cache does not leak provenance across languages (CEL-1545)", () => {
+  it("still calls the provider for the second language even though its file already has values", async () => {
+    // ru's file predates this run entirely — nothing has verified it against
+    // the current English text under --no-cache.
+    writeTarget("ru", {
+      save: "Сохранить (старое)",
+      item_one: "{{count}} штука (старое)",
+      item_other: "{{count}} штук (старое)",
+      cancel: "Отмена (старое)",
+    });
+
+    const spy = spyProvider();
+    await translate({
+      input: enDir,
+      outputLanguages: ["zh", "ru"],
+      provider: spy,
+      noCache: true,
+    });
+
+    expect(askedKeysFor(spy, "ru")).toEqual(
+      expect.arrayContaining(["save", "cancel"])
+    );
+  });
+});
+
 /** `--dry-run` reads the same per-language view the real run does. */
 describe("translate — dry run", () => {
   function degradingSave(lang: string): TranslationProvider {

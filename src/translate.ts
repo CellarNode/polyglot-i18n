@@ -885,12 +885,23 @@ export async function translate(
       // degraded — and, unlike the in-memory union this replaced, the eviction
       // survives the process. Running `-o zh` and then `-o ru` as two separate
       // invocations now behaves exactly like `-o zh,ru` (CEL-1543).
-      fullCache[cacheKey] = mergeNamespaceCache(namespaceCache, lang, {
-        hashes: buildCacheEntries(sourceFlat),
-        provenance: result.sourceProvenance,
-        stale: result.staleSourceKeys,
-        accepted: result.acceptedSourceKeys,
-      });
+      //
+      // Skipped entirely under `--no-cache` (`cacheFilePath === null`): nothing
+      // is ever read back out of `fullCache` at the end of the run, but the
+      // object itself lives for the length of this whole function, across every
+      // language. Merging into it anyway let the FIRST language's translation
+      // mint a bare-hash entry the SECOND language's `namespaceCache` read back
+      // as its own cached provenance — `-o zh,ru` silently skipped every ru key
+      // whose target file happened to already hold a value, exactly the run
+      // `--no-cache` exists to force through the provider (CEL-1545).
+      if (cacheFilePath) {
+        fullCache[cacheKey] = mergeNamespaceCache(namespaceCache, lang, {
+          hashes: buildCacheEntries(sourceFlat),
+          provenance: result.sourceProvenance,
+          stale: result.staleSourceKeys,
+          accepted: result.acceptedSourceKeys,
+        });
+      }
 
       totalResult.translated += result.translated;
       totalResult.skipped += result.skipped;
