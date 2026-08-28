@@ -285,6 +285,19 @@ export function mergeNamespaceCache(
     // A key the cache has never seen has no other language to protect, so the
     // acting language's provenance becomes the default and the entry can stay
     // a bare hash. From then on the default never moves.
+    //
+    // "No other language to protect" assumes no other language already has a
+    // value on disk under this key — true for a brand-new key, NOT provably
+    // true after the cache file is deleted (or the key removed and re-added)
+    // while target files survive: the next language to run this key through
+    // still lands here with `prev` undefined, and retroactively blesses every
+    // sibling target file that happens to already hold something as "cached",
+    // unverified. This function only ever sees ONE language's target state
+    // (via `update`) plus whatever the cache already recorded (`prev`) — never
+    // the other languages' files — so it cannot tell the two cases apart
+    // without a caller-supplied directory-wide scan this merge boundary was
+    // never built to need. Known limitation, not fixed here (CEL-1545 P3); see
+    // AGENTS.md "Incremental cache".
     const defaultHash = entryHash(prev) ?? mine.hash;
 
     const langs: Record<string, LangProvenance> = {};

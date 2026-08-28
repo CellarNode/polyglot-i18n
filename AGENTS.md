@@ -62,9 +62,16 @@ manual translation fixes.
 
 The cache has a **language dimension** since 0.4.0 (CEL-1543). An entry is either a bare hash —
 what every version up to 0.3.2 wrote, read as "every language's value on disk answers this text" —
-or `{ hash, langs: { zh: { hash, state?: "stale" | "accepted" } } }`. Only divergence is recorded,
-so an all-clean namespace stays a plain hash map and existing cache files need no migration; a key
-upgrades to the record shape the first time a language diverges on it.
+or `{ hash, langs: { zh: { hash, state?: "stale" | "accepted" } } }`. Only divergence from the
+entry's frozen default is recorded, so existing cache files need no migration and a key upgrades to
+the record shape the first time a language diverges on it — but that upgrade is one-way. Because the
+default never advances (below), a key's FIRST post-creation English edit upgrades it permanently:
+every language that retranslates from then on adds its own `langs` sub-entry, and — short of the
+English text reverting to the exact string the frozen default was minted from — the entry never
+collapses back to a bare hash, even once every language has caught up to the same current hash. So
+"an all-clean namespace stays a plain hash map" holds only up to a namespace's first English edit;
+past that, growth is one sub-entry per language per edited key, bounded by the output language
+count, not by run count (CEL-1545).
 
 Three rules hold the whole design up:
 
@@ -76,15 +83,32 @@ Three rules hold the whole design up:
 - **The entry-level `hash` is the default for unlisted languages, and it is FROZEN.** It is set
   once, when the entry is created, and never advances. 0.3.x rewrote a shared hash inside the
   per-language loop, so after an English edit the first language retranslated and every later one
-  measured its own stale file against the new hash and skipped.
+  measured its own stale file against the new hash and skipped. Advancing it later, once every
+  language `mergeNamespaceCache` currently has a record for agrees on a newer hash, was considered
+  and rejected: the merge only ever sees the languages that have already run at least once against
+  this cache file, never the full roster the project actually ships, so "every language I know about
+  agrees" cannot be told apart from "a language nobody has run yet is still owed a translation of
+  this key" (CEL-1545).
 - **`mergeNamespaceCache` touches one language.** 0.3.x held the union of every eviction in memory
   and rewrote the whole namespace on each language's turn, so the eviction died with the process:
   `-o zh` then `-o ru` as two commands put the key back and cached a value nothing had vouched
   for. It also billed every other language for a retranslation it did not need.
 
-A language with no record is cached at the default. Safe because a language with no value on disk
-is classified `missing` by `computeDiff` before the cache is consulted, so "cached" can only be
-reached by a language that already has one.
+A language with no record is cached at the default. Safe when that language truly has no value on
+disk yet — `computeDiff` classifies it `missing` before the cache is even consulted — but NOT
+proven safe otherwise: for a key the cache has never recorded at all (a fresh key, or any key after
+the cache file is deleted and target files are not), the first language to translate it mints the
+entry's frozen default from ITS OWN provenance alone, and every other language is retroactively
+read as cached at that hash the moment its own target file already holds a value under that key —
+however that value got there, and without that language ever having run against this cache.
+`mergeNamespaceCache` has no way to tell "no other language has a file yet" from "other languages
+have files this cache has simply never seen": that needs the target directory of every language
+this project ships, not just the one being merged, and not just the languages named in the current
+`--output-languages` (the risk case is exactly a SEPARATE later invocation, per the two-command
+`-o zh` / `-o ru` example this design already treats as fully equivalent to one). Left undone rather
+than fixed as a directory-wide pre-scan the merge boundary was never built to need (CEL-1545); the
+practical exposure is a deliberate, rare action — deleting the cache file or removing and re-adding
+a key — not routine incremental use.
 
 `accepted` is the mitigation the dimension unlocks: a key whose target file already holds a better
 answer than the provider can produce (a uniform `{{count}} мл` group, a `{{count}} PDF` the leak
