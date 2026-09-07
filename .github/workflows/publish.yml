@@ -3,13 +3,14 @@ on:
   push:
     branches: [main]
 
-permissions:
-  contents: read
-  id-token: write
-
 jobs:
   publish:
     runs-on: ubuntu-latest
+    # Scoped to this job, not the workflow: a job added to this file later
+    # would otherwise inherit `id-token: write` it does not need.
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@v4
         with:
@@ -27,23 +28,42 @@ jobs:
 
       # npm Trusted Publishing (OIDC) needs npm CLI >= 11.5.1. Node 22 only
       # bundles npm 10.x, so upgrade before anything else touches the
-      # registry. See https://docs.npmjs.com/trusted-publishers.
+      # registry. Pinned to the 11.x line, not `@latest`: npm 12 is already
+      # out and warns that setup-node's `always-auth` config "will stop
+      # working in the next major" — floating to `@latest` would silently
+      # pull that break in on some future run. See
+      # https://docs.npmjs.com/trusted-publishers.
       - name: Upgrade npm for trusted publishing (needs npm >= 11.5.1)
         run: |
-          npm install -g npm@latest
+          npm install -g npm@^11.5.1
           npm --version
 
       # CEL-1733 — only publish when this push actually bumped the version.
       # Without this gate every merge to main (docs, tests, refactors) would
       # re-run `npm publish` against an already-published version.
+      #
+      # Compare against the push event's previous main SHA
+      # (`github.event.before`) rather than `HEAD~1`: this repo allows rebase
+      # merges, and a rebase merge can push several commits at once, making
+      # `HEAD~1` the PR's second-to-last commit rather than the pre-merge tip
+      # of main — a version bump that isn't the newest commit would silently
+      # be skipped. `before` is the all-zeros SHA on the first push to a new
+      # branch (nothing to diff against, so PREVIOUS_VERSION stays empty);
+      # if it is set but can't be fetched (e.g. an older/replayed event) we
+      # fall back to the previous `HEAD~1` comparison.
       - name: Check whether package.json version changed
         id: version
         run: |
           CURRENT_VERSION=$(node -p "require('./package.json').version")
-          if git show HEAD~1:package.json > "$RUNNER_TEMP/prev-package.json" 2>/dev/null; then
-            PREVIOUS_VERSION=$(node -p "require('$RUNNER_TEMP/prev-package.json').version")
-          else
-            PREVIOUS_VERSION=""
+          BEFORE_SHA="${{ github.event.before }}"
+          PREVIOUS_VERSION=""
+          if [ -n "$BEFORE_SHA" ] && [ "$BEFORE_SHA" != "0000000000000000000000000000000000000000" ]; then
+            if git fetch --no-tags --depth=1 origin "$BEFORE_SHA" 2>/dev/null && \
+               git show "$BEFORE_SHA:package.json" > "$RUNNER_TEMP/prev-package.json" 2>/dev/null; then
+              PREVIOUS_VERSION=$(node -p "require('$RUNNER_TEMP/prev-package.json').version")
+            elif git show HEAD~1:package.json > "$RUNNER_TEMP/prev-package.json" 2>/dev/null; then
+              PREVIOUS_VERSION=$(node -p "require('$RUNNER_TEMP/prev-package.json').version")
+            fi
           fi
           if [ "$CURRENT_VERSION" = "$PREVIOUS_VERSION" ]; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
@@ -54,6 +74,14 @@ jobs:
           fi
           echo "version=$CURRENT_VERSION" >> "$GITHUB_OUTPUT"
 
+      # This job's OIDC request variables (ACTIONS_ID_TOKEN_REQUEST_URL /
+      # ACTIONS_ID_TOKEN_REQUEST_TOKEN) are visible to every step here, not
+      # just the publish step — so no untrusted script should run in this
+      # job. No separate `--ignore-scripts` flag is needed: pnpm 10 already
+      # refuses to run dependency lifecycle scripts unless the package is
+      # allow-listed (`pnpm.onlyBuiltDependencies` / an explicit
+      # `pnpm approve-builds`) — verified locally (`esbuild` and
+      # `protobufjs` build scripts ignored by default on this install).
       - name: Install dependencies
         if: steps.version.outputs.changed == 'true'
         run: pnpm install --frozen-lockfile
