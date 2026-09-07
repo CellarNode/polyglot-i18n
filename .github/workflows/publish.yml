@@ -3,29 +3,75 @@ on:
   push:
     branches: [main]
 
+permissions:
+  contents: read
+  id-token: write
+
 jobs:
   publish:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      id-token: write
     steps:
       - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
         with:
-          version: 10
+          fetch-depth: 2
+          persist-credentials: false
+
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           registry-url: https://registry.npmjs.org
-          cache: pnpm
 
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm test
-      - run: pnpm build
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
 
+      # npm Trusted Publishing (OIDC) needs npm CLI >= 11.5.1. Node 22 only
+      # bundles npm 10.x, so upgrade before anything else touches the
+      # registry. See https://docs.npmjs.com/trusted-publishers.
+      - name: Upgrade npm for trusted publishing (needs npm >= 11.5.1)
+        run: |
+          npm install -g npm@latest
+          npm --version
+
+      # CEL-1733 — only publish when this push actually bumped the version.
+      # Without this gate every merge to main (docs, tests, refactors) would
+      # re-run `npm publish` against an already-published version.
+      - name: Check whether package.json version changed
+        id: version
+        run: |
+          CURRENT_VERSION=$(node -p "require('./package.json').version")
+          if git show HEAD~1:package.json > "$RUNNER_TEMP/prev-package.json" 2>/dev/null; then
+            PREVIOUS_VERSION=$(node -p "require('$RUNNER_TEMP/prev-package.json').version")
+          else
+            PREVIOUS_VERSION=""
+          fi
+          if [ "$CURRENT_VERSION" = "$PREVIOUS_VERSION" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "package.json version ($CURRENT_VERSION) is unchanged since the previous commit on main — skipping the rest of the publish job."
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "package.json version changed: ${PREVIOUS_VERSION:-<none>} -> $CURRENT_VERSION"
+          fi
+          echo "version=$CURRENT_VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Install dependencies
+        if: steps.version.outputs.changed == 'true'
+        run: pnpm install --frozen-lockfile
+
+      - name: Test
+        if: steps.version.outputs.changed == 'true'
+        run: pnpm test
+
+      - name: Build
+        if: steps.version.outputs.changed == 'true'
+        run: pnpm build
+
+      # Belt-and-braces alongside the version-changed gate above: also skip
+      # if this exact version somehow already exists on npm (e.g. a retried
+      # workflow run). Public package, so `npm view` works unauthenticated.
       - name: Check if version exists on npm
         id: version-check
+        if: steps.version.outputs.changed == 'true'
         run: |
           PACKAGE_NAME=$(node -p "require('./package.json').name")
           PACKAGE_VERSION=$(node -p "require('./package.json').version")
@@ -37,8 +83,15 @@ jobs:
             echo "Version ${PACKAGE_VERSION} not yet published."
           fi
 
+      # Trusted Publishing (OIDC): no NODE_AUTH_TOKEN / NPM_TOKEN anywhere in
+      # this job. The npm CLI detects the GitHub Actions OIDC environment
+      # (this job's `id-token: write` permission) and exchanges it for a
+      # short-lived publish token itself — requires the npmjs.com Trusted
+      # Publisher config to exist first (Organization CellarNode, Repository
+      # polyglot-i18n, Workflow publish.yml, no Environment — see CEL-1733).
+      # Provenance is generated automatically here and needs no flag: this
+      # is a public repo publishing a public package, the only combination
+      # npm signs by default.
       - name: Publish
-        if: steps.version-check.outputs.exists == 'false'
-        run: npm publish --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        if: steps.version.outputs.changed == 'true' && steps.version-check.outputs.exists == 'false'
+        run: npm publish --access public
