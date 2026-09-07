@@ -415,6 +415,16 @@ const result = await translate({
 console.log(`Translated ${result.translated} keys, skipped ${result.skipped}`);
 ```
 
+## Publishing
+
+Published to npm (public access, unscoped) via **npm Trusted Publishing (OIDC)** —
+`.github/workflows/publish.yml` publishes automatically on a merge to `main` that changes
+`package.json`'s version. There is no long-lived npm token in the publish job, and nobody runs
+`npm publish` by hand. Provenance is generated automatically (public repo + public package).
+
+Bump `version` in `package.json` and land it through a normal PR — merging to `main` is what
+triggers the publish job, gated on the version having actually changed.
+
 ## License
 
 MIT
