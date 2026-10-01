@@ -53,7 +53,7 @@ Options:
   -i, --input <path>              Source English file or directory (required)
   -o, --output-languages <langs>  Comma-separated target language codes (required)
   -p, --provider <provider>       gemini or deepl (default: gemini)
-  -m, --model <model>             Gemini model (default: gemini-3.1-flash-lite-preview)
+  -m, --model <model>             Gemini model (default: gemini-3.8-flash)
   -k, --api-key <key>             API key (or use GOOGLE_API_KEY / DEEPL_API_KEY env)
   --output-dir <path>             Output directory
   -f, --force                     Retranslate all keys
@@ -104,7 +104,7 @@ The action automatically creates a PR with the translated files.
 | `input` | Yes | — | Path to English source file/directory |
 | `output-languages` | Yes | — | Comma-separated target language codes |
 | `api-key` | Yes | — | Provider API key |
-| `model` | No | `gemini-3.1-flash-lite-preview` | Model (Gemini only) |
+| `model` | No | `gemini-3.8-flash` | Model (Gemini only) |
 | `output-dir` | No | auto | Output directory |
 | `force` | No | `false` | Retranslate all keys |
 | `context` | No | — | Domain context |
@@ -370,7 +370,7 @@ targets.
 
 Default provider. Set `GOOGLE_API_KEY` env var or pass `--api-key`.
 
-Default model: `gemini-3.1-flash-lite-preview`. Override with `--model`.
+Default model: `gemini-3.8-flash`. Override with `--model`.
 
 ### DeepL
 

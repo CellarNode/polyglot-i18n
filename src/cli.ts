@@ -30,7 +30,7 @@ program
   .option(
     "-m, --model <model>",
     "Model name (Gemini only)",
-    "gemini-3.1-flash-lite-preview"
+    "gemini-3.8-flash"
   )
   .option(
     "-k, --api-key <key>",

@@ -411,7 +411,7 @@ export class GeminiProvider implements TranslationProvider {
   private client: GoogleGenAI;
   private model: string;
 
-  constructor(apiKey: string, model = "gemini-3.1-flash-lite-preview") {
+  constructor(apiKey: string, model = "gemini-3.8-flash") {
     this.client = new GoogleGenAI({ apiKey });
     this.model = model;
   }
