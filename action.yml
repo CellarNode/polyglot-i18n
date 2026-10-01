@@ -21,7 +21,7 @@ inputs:
   model:
     description: 'Model name (Gemini only)'
     required: false
-    default: 'gemini-3.1-flash-lite-preview'
+    default: 'gemini-3.8-flash'
   output-dir:
     description: 'Output directory (defaults to sibling of input)'
     required: false
