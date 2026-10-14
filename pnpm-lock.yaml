@@ -12,8 +12,8 @@ importers:
   .:
     dependencies:
       '@google/genai':
-        specifier: ^1.52.0
-        version: 1.52.0
+        specifier: ^2.27.0
+        version: 2.27.0
       commander:
         specifier: ^13.1.0
         version: 13.1.0
@@ -189,8 +189,8 @@ packages:
     cpu: [x64]
     os: [win32]
 
-  '@google/genai@1.52.0':
-    resolution: {integrity: sha512-gwSvbpiN/17O9TbsqSsE/OzZcpv5Fo4RQjdngGgogtuB9RsyJ8ZHhX5KjHj1bp5N9snN2eK8LDGXSaWW2hof8Q==}
+  '@google/genai@2.27.0':
+    resolution: {integrity: sha512-W6F9Y9d4h7cVQNa85IPCOVVP9PiUzve/ZQPBvQnBmnBJcLvxstEw+R2X/RyCH0SOe0HVDQzeKDpDUf6ZRtbmdQ==}
     engines: {node: '>=20.0.0'}
     peerDependencies:
       '@modelcontextprotocol/sdk': ^1.25.2
@@ -904,7 +904,7 @@ snapshots:
   '@esbuild/win32-x64@0.28.2':
     optional: true
 
-  '@google/genai@1.52.0':
+  '@google/genai@2.27.0':
     dependencies:
       google-auth-library: 10.9.1
       p-retry: 4.6.2
