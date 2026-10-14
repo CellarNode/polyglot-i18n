@@ -1,0 +1,19 @@
+pnpm-lock.yaml
+  s_4fb4393eff17a7::t_ee2ee7fb6ae326 31-32,201-204,208-210,398-399,402,409-410,443-444,491-492,619-620,651-654,693-694,696-698,700-702,756-758,762-769,772,776,780-788,801-803,909-910,913-917,1031,1033-1034,1036,1040,1069,1109,1280,1304-1305,1375,1377,1379,1402,1405-1407,1409-1410,1412-1414,1417,1425
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "007405d4fca9e5c040adfa88fb78e172da8e3eb7",
+  "prompts": {},
+  "sessions": {
+    "s_4fb4393eff17a7": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f4d34e26-752c-4de0-b0eb-3b816dce2681",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "mjnong <marcusnagy@icloud.com>"
+    }
+  }
+}
