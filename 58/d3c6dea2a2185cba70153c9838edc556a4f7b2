@@ -1,0 +1,19 @@
+package.json
+  s_4fb4393eff17a7::t_ccda0e3332a092 42
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "58d3c6dea2a2185cba70153c9838edc556a4f7b2",
+  "prompts": {},
+  "sessions": {
+    "s_4fb4393eff17a7": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f4d34e26-752c-4de0-b0eb-3b816dce2681",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "mjnong <marcusnagy@icloud.com>"
+    }
+  }
+}
