@@ -1,3 +1,9 @@
 minimumReleaseAge: 10080
 minimumReleaseAgeExclude:
   - '@cellarnode/*'
+overrides:
+  # Exact pin on purpose. axios 1.14.1 was compromised, so never use a range
+  # here (a range could resolve to it). 1.20.0 is the newest release at least
+  # 7 days old (2026-08-26), published from axios/axios with provenance, and
+  # clears the axios advisories that 1.13.6 carried.
+  axios: 1.20.0
